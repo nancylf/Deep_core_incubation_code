@@ -1,0 +1,2817 @@
+---
+title: "Deep Core - Incubation Data Compilation"
+author: "Nancy Freitas"
+date: "started: February 12, 2020; completed: Feb 17, 2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+## Description
+
+This document will be used to compile data that pertains to the NSF Goldstream and NGEE Arctic projects. Lake sediment samples were incubated under different oxygen conditions (aerobic and anaerobic) and at different temperatures (4C, 10C, and 20C) for one year. Gas samples were collected from jars at various time points, and were run on a gas chromatograph (GC) to determine methane (CH~4~) and carbon dioxide (CO~2~) emissions.
+
+Emission data is organized into data frames, tidied, and scaled into CH~4~ and CO~2~ cumulative production, and respiration per unit time. Production data is normalized by quantity of sediment (g) and/or by quantity of carbon (gC) in each sample. Data is visualized by depth and type of gas released from the sediment, and temperature sensitivity analyses (Q10 and temperature ratios) are included.
+
+#### Required Data
+
+1. Concentrations of CO~2~ and CH~4~ by time point (GC raw data) 
+2. Sediment characterization - total carbon, total organic carbon by sample depth, etc. (compiled by Josefine Lenz)
+
+#### Data Analysis 
+
+##### 1. Load Packages
+
+```{r, message=FALSE}
+
+# provides functions like mutate(), select(), filter(), summarize(), arrange()
+library(dplyr)
+
+# set of packages for everyday data analyses - ggplot2, dplyr, tidyr, readr, purrr, tibble, stringr, forcats
+library(tidyverse)
+
+# provides summary statistics about variables, main focus is on data frames
+library(skimr)
+
+# imports Excel files into R as .xls or .xlsx
+library(readxl)
+
+# makes it possible to use select functions in tidyverse (e.g. "starts_with")
+library(tidyselect)
+
+# makes it possible to use function data.table to subset josi's dataframe
+library(data.table)
+
+# makes it possible to use function match.closest to subset josi's dataframe
+library(MALDIquant)
+
+# color palettes for ggplot2 associated with RColorBrewer package
+library(RColorBrewer)
+
+# allows highlighting of selected data within graphs
+library(gghighlight)
+
+# makes it possible to add equations, p-values, significance levels to plots
+library(ggpubr)
+
+# cleans up summary statistics for model outputs (e.g. linear models)
+library(broom)
+library(broom.mixed)
+
+```
+
+
+##### 2. Import data
+
+Import the compiled GC data from a large Excel file. This can be done by sheet name:
+  * Anaerobic CO2 by time point: "ANA CO2 Compiled"
+  * Anaerobic CH4 by time point: "ANA CH4 Compiled"
+  * Aerobic CO2 by time point: "AER CO2 Compiled"
+  * Aerobic CH4 by time point: "AER CH4 Compiled"
+  
+  These data will be used to create visualizations of CO~2~ and CH~4~ respiration at different soil depths and oxygen conditions (e.g. gC respired/hr/gC in sediment)
+  
+Import Josi's sediment data from a separate Excel file. This can be done by sheet name:
+  * Surface core (Vibracore) sediment data: "GSL18-VC11"
+  * Deep core (Borehole) sediment data: "GSL18-DC-BH1"
+  
+  Josi's data will be used to extract % carbon and % nitrogen values. The %C values will be combined with my GC data to calculate CO~2~ and CH~4~ respiration.
+  
+NOTES:
+  * This process is easier to do directly from Excel sheets because they are updated frequently
+  * It is faster to work directly from Excel than .csv files
+  * Importing the .csv files results in many empty columns where the original Excel sheets were worked on, whereas importing the Excel files does not do this
+  
+```{r}
+# read in Excel files that contain raw CO2 and CH4 concentration data (ppmv): read_excel(excel file, sheet name or number)
+
+ngee_nsf_compiled_data <- "/Users/nancylf/Documents/UC Berkeley/Research/NGEE Arctic/NSF Goldstream Project/Incubations/Flux Data/NGEE NSF Incubations_Compiled Data.xlsx"
+
+ana_co2_raw <- read_excel(ngee_nsf_compiled_data, sheet = "ANA CO2 Compiled")
+ana_ch4_raw <- read_excel(ngee_nsf_compiled_data, sheet = "ANA CH4 Compiled")
+aer_co2_raw <- read_excel(ngee_nsf_compiled_data, sheet = "AER CO2 Compiled")
+aer_ch4_raw <- read_excel(ngee_nsf_compiled_data, sheet = "AER CH4 Compiled")
+
+# read in Josi's data from Excel files - cell row ranges were used because her Excel sheets contain written notes at the bottom
+
+josi_data <- "/Users/nancylf/Documents/UC Berkeley/Research/NGEE Arctic/NSF Goldstream Project/Josi's Data/GSL18_sediment data_all.xlsx"
+
+vc_sed_data <- read_excel(josi_data, "GSL18-VC11", range = cell_rows(1:66))
+bh_sed_data <- read_excel(josi_data, "GSL18-DC-BH1", range = cell_rows(1:86))
+
+```
+
+
+##### 3. Clean up the formatting of the raw data
+  * Reshape GC data so that it is long not wide
+    * Three columns: sample ID, timepoint, ghg concentration
+  * Split sample IDs into depths and replicates
+  * Join anaerobic dataframes into one, and aerobic dataframes into one
+  * Rename each depth ID so that single digits are preceded by a "0"
+  
+```{r}
+# column names are variables, row data are observations
+# take each df, use gather to collect the column names and name them as timepoint variables, collect the data within the rows (column 2 : the total number of columns) and name them as observations, and then assign them to a new df
+ana_co2 <- gather(ana_co2_raw, "timepoint", conc_ppmv, 2:ncol(ana_co2_raw))
+ana_ch4 <- gather(ana_ch4_raw, "timepoint", conc_ppmv, 2:ncol(ana_ch4_raw))
+aer_co2 <- gather(aer_co2_raw, "timepoint", conc_ppmv, 2:ncol(aer_co2_raw))
+aer_ch4 <- gather(aer_ch4_raw, "timepoint", conc_ppmv, 2:ncol(aer_ch4_raw))
+
+# write a function that separates: 1) sample ID into depth ID and replicate # ; and 2) timepoint into gas and timepoint. This will make it easier to combine both ana dfs into one, and both aer dfs into one, and to group by depth and replicate for future analysis across columns
+split_cols <- function(df, is_ana){
+  df <- df %>% 
+    mutate(sample_ID = Sample) %>% 
+    select(sample_ID, everything())
+  df <- separate(df, Sample, c("depth_ID", "replicate"), sep = "_" ) 
+  df <- separate(df, timepoint, c("gas_sampled", "timepoint"), sep = "_T")
+  if(is_ana){
+   df$depth_ID <- sub("A", "", df$depth_ID)
+  }
+  return(df)
+}
+
+ana_co2 <- split_cols(ana_co2, TRUE)
+ana_ch4 <- split_cols(ana_ch4, TRUE)
+aer_co2 <- split_cols(aer_co2, FALSE)
+aer_ch4 <- split_cols(aer_ch4, FALSE)
+
+# join ana dfs and aer dfs
+ana_df <- full_join(ana_co2, ana_ch4)
+aer_df <- full_join(aer_co2, aer_ch4)
+
+# label the single digit depth IDs with a leading "0" so that they sort well with the 10, 11, 12 values
+for (i in ana_df$depth_ID){
+  if(nchar(i) == 1){
+    ana_df$depth_ID[ana_df$depth_ID == i] <- paste("0", substring(i, 1), sep = "")
+  }
+}
+
+for (i in aer_df$depth_ID){
+  if(nchar(i) == 1){
+    aer_df$depth_ID[aer_df$depth_ID == i] <- paste("0", substring(i, 1), sep = "")
+  }
+}
+
+```
+
+
+##### 4. Join categorical data from other Excel sheets for each sampling depth
+  * Read in core depth data - this includes the core segment names and depths (in cm) that samples were taken from down the original sediment cores
+  * Join these data to the anaerobic and aerobic dataframes (ana_df and aer_df) - this will allow Josi's data to be added to the table by core depth
+  * Sort the dfs by gas, depth_ID, then replicate so that timepoint data stacks for each replicate, and then arrange the dfs by gas with CO~2~ at the top and CH~4~ at the bottom
+  * Read in sampling dates and join to ana_df and aer_df
+  * Create one large df with anaerobic and aerobic data
+  
+```{r}
+# read in Excel sheet that contains core depths that pertain to the sample IDs (depth ID and replicate #) - these will be used to add Josi's data into my dfs
+sample_key_data <- "/Users/nancylf/Documents/UC Berkeley/Research/NGEE Arctic/NSF Goldstream Project/Incubations/Flux Data/Incubation Sample Key and Dates.xlsx"
+core_depths <- read_excel(sample_key_data, "Core Depths and IDs - VC and DC")
+
+# split Sample Depth column into two columns called sample depth lower (cm) and sample depth upper (cm); rename Depth ID and Core ID columns
+core_depths <- core_depths %>%
+  separate("Sample Depth (cm)", 
+           c("sample_depth_lower_cm", "sample_depth_upper_cm"), sep = "-" ) %>%
+  rename(depth_ID = "Depth ID", core_ID = "Core ID")
+
+# convert depth_ID column to character values and add a "0" preceding the single digit depths so that this df can be joined more easily with ana_df and aer_df
+core_depths <- core_depths %>% 
+  mutate(depth_ID = as.character(depth_ID))
+
+for (i in core_depths$depth_ID){
+  if(nchar(i) == 1){
+    core_depths$depth_ID[core_depths$depth_ID == i] <- paste("0", substring(i, 1), sep = "")
+  }
+}
+
+# join ana_df and aer_df to core_depths using a left join - this is so that the core_depths categorical data logically precedes the ana_df and aer_df data
+ana_df <- left_join(core_depths, ana_df, by = "depth_ID")
+aer_df <- left_join(core_depths, aer_df, by = "depth_ID")
+
+# order the dfs by gas, depth_ID, then replicate so that timepoint data stacks for each replicate (i.e. T0-T20 will be visible for 1_1, then 1_2, etc.) 
+# order requires a "," after the subset column to indicate that the function should pick up the rest of the columns too
+# use arrange to sort CO2 to the top and CH4 to the bottom, mostly for aesthetics
+ana_df <- ana_df[order(ana_df$gas_sampled, ana_df$depth_ID, ana_df$replicate),] %>%
+  arrange(desc(gas_sampled))
+aer_df <- aer_df[order(aer_df$gas_sampled, aer_df$depth_ID, aer_df$replicate),] %>%
+  arrange(desc(gas_sampled))
+
+# read in Excel sheet that contains sampling dates and days
+sampling_dates <- read_excel(sample_key_data, "Sampling Dates - VC and DC")
+
+# select the columns that pertain to anaerobic and aerobic samples, rename, and store them as their own dfs
+ana_sampling_dates <- select(sampling_dates, 
+                             timepoint = "Timepoint", 
+                             samp_int_day = "ANA Sampling Interval (days)",
+                             samp_int_date = "ANA Sampling Date")
+aer_sampling_dates <- select(sampling_dates, 
+                             timepoint = "Timepoint", 
+                             samp_int_day = "AER Sampling Interval (days)",
+                             samp_int_date = "AER Sampling Date")
+
+# remove the Ts that precede the timepoints in each df
+for (i in ana_sampling_dates$timepoint){
+  ana_sampling_dates$timepoint[ana_sampling_dates$timepoint == i] <- paste(substring(i, 2), sep = "")
+}
+
+for (i in aer_sampling_dates$timepoint){
+  aer_sampling_dates$timepoint[aer_sampling_dates$timepoint == i] <- paste(substring(i, 2), sep = "")
+}
+
+# join sampling dates dfs to ana_df and aer_df
+ana_df <- left_join(ana_df, ana_sampling_dates)
+aer_df <- left_join(aer_df, aer_sampling_dates)
+
+# add a column that distinguishes anaerobic and aerobic samples, and convert conc_ppmv columns to numeric values so that the dfs can be joined more easily - one df's columns are currently stored as characters
+# NAs will be introduced where there is no data for specific time points
+ana_df <- ana_df %>%
+  add_column(headspace_treatment = "anaerobic", .after = "core_ID") %>%
+  mutate(conc_ppmv = as.numeric(conc_ppmv))
+aer_df <- aer_df %>% 
+  add_column(headspace_treatment = "aerobic", .after = "core_ID") %>%
+  mutate(conc_ppmv = as.numeric(conc_ppmv))
+
+# join ana_df and aer_df into one large incubation df
+inc_df <- full_join(ana_df, aer_df)
+
+```
+
+
+##### 5. Finish adding columns with categorical data
+  * Add an incubation temperature column
+  * Add an hours column
+  * Rearrange columns for easier viewing
+  
+```{r}
+# add a temperatures column by replicate # - replicates 1-3 = 4C, replicates 4-6 = 10C, replicates 7-9 = 20C
+inc_df <- add_column(inc_df, temp_treatment_C = 0, .after = "headspace_treatment")
+inc_df$temp_treatment_C <- ifelse(inc_df$replicate <= 3, 4, ifelse(inc_df$replicate >= 4 & inc_df$replicate <= 6, 10, 20))
+
+# add an hours column - hours are approximated based on the number of days that elapsed between sampling time points. These values can be made more precise by accounting for the individual jar and the exact number of hours that elapsed between time points, but that has been deemed unnecessary at this moment
+inc_df <- inc_df %>% mutate(samp_int_hr = samp_int_day * 24)
+
+# rearrange columns, don't use select because it has to be used multiple times - pick up all rows, then arrange columns
+inc_df <- inc_df[, c(3, 1:2, 4:5, 7, 6, 8, 13:12, 14, 10:9, 11)]
+
+```
+
+
+##### 6. Correct implausible decreases in certain raw, measured concentrations - likely dilution errors 
+
+  * Three errors occurred that needed to be corrected:
+    * Anaerobic vial dilutions occurred at ANA T11 (day 40), ANA T12 (day 47), and ANA T13 (day 54) - these samples were run on the GC but the data show a drop in concentration across the time points that was deemed implausible. These time points will be kept in the 12 month data set because the samples were pulled and jar headspace diluted, but it will be assumed that zero respiration of CO2 and CH4 occurred at each point. The corrected concentration values will only take into account the 7mL dilution of the headspace that occurred when samples were pulled at each time point (the sample volume was replaced with carbon-free air or nitrogen gas to maintain the pressure in the jar).
+  
+    * Anaerobic vials were not run on the GC for ANA T18 (day 90) and ANA T29 (day 195) - data is therefore missing for these time points. Similar to above, the time points will be kept in the 12 month data set, but it will be assumed that zero respiration of CO2 and CH4 occurred at these time points. Only a 7mL dilution of the headspace will be taken into account at each timepoint.
+  
+    * Aerobic and anaerobic jar dilution errors occurred at AER T19 (day 99) and ANA T27 (day 167). CO2 data will be corrected due to decreases in concentrations across all jars, but CH4 data will not be. This is because, 1) unlike the CO2 concentrations, CH4 concentrations did not clearly decrease during the dilution periods (in part because CH4 concentrations were so low for most samples by this point in the incubations), and 2) correcting these assumes that CH4 production was 0 during these time periods (which the data indicates is false) and reduces a few of the final CH4 concentrations at day 365 by up to 50% for depths that did have demonstrable CH4 production. Similar to above, the timepoint at which the jar dilution occurred plus the following three time points (inclusive) are assumed to have zero CO2 respiration, and only a 7mL dilution of the headspace is accounted for at each of these timepoints. Then, because the raw concentrations of CO2 in the jars began to recover on the 5th timepoint after the dilutions occurred (AER T23 and ANA T31), these timepoints will represent the new starting points for the corrected concentrations - at these timepoints (and all timepoints thereafter) the corrected concentrations will be increased proportionately by the amounts that the raw concentrations increased between each timepoint.
+
+```{r}
+# create a second df (inc_df2) to use for calculations so that prior compiled data doesn't need to be reloaded if a mistake is made
+inc_df2 <- inc_df
+
+# make sure all timepoint values are numeric, filter data, and add a conc_ppmv_corr column; this column will be used to correct the dilutions
+inc_df2 <- inc_df2 %>%
+  mutate(timepoint = as.numeric(timepoint), conc_ppmv_corr = NA)
+
+fil_aer_co2 <- inc_df2 %>%
+  filter(headspace_treatment == "aerobic", gas_sampled == "CO2")
+fil_ana_co2 <- inc_df2 %>%
+  filter(headspace_treatment == "anaerobic", gas_sampled == "CO2")
+fil_aer_ch4 <- inc_df2 %>%
+  filter(headspace_treatment == "aerobic", gas_sampled == "CH4")
+fil_ana_ch4 <- inc_df2 %>%
+  filter(headspace_treatment == "anaerobic", gas_sampled == "CH4")
+
+# Due to the jar dilutions that occurred at AER T19 (day 99) and ANA T27 (day 167), the data needs to be corrected from these time points onward. This was done in two steps. 
+
+# First, the time point that the jar dilutions occurred on plus the following three time points (inclusive) were assumed to have zero CO2 respiration. However, they still included a 7mL dilution that occurred at each timepoint after the gas sample was taken from the jar. Therefore, conc_ppmv_corr includes only a 7mL dilution and was calculated using Avogadro's law (V1/n1 = V2/n2), where n2 is the newly calculated conc_ppmv_corr. V1 was the volume of the jar (115.6mL) converted to L, n1 was the preceding conc_ppmv_corr converted to mols, V2 was the volume of the jar minus the volume of air+gas removed (can also be thought of as the volume of headspace diluted by 7mL air, 115.6mL - 7mL = 108.6mL) converted to L, and n2 was the new calculated conc_ppmv_corr in mols. V1 remains the same every time because the jars received a 7mL dilution between n2[i-1] and n1[i], so the same volume of air remained in the jars, but the volume of gas decreased each time. 
+# Because vial dilutions and missing data also occurred at ANA T11 (day 40), ANA T12 (day 47), and ANA T13 (day 54), ANA T18 (day 90), and ANA T29 (day 195), these concentrations were also corrected using the same methodology (assumed zero respiration between time points and only accounted for the 7mL dilution) at the same time as the jar dilutions. This was done for both ANA CO2 and ANA CH4.
+
+# Second, because the raw concentrations of CO2 in the jars begins to recover on the 5th timepoint after the jar dilutions occurred (AER T23 and ANA T31), these timepoints will be the new starting points for the corrected concentrations. At these timepoints (and all thereafter) the corrected concentrations will be increased proportionately by the amount that the *raw* concentrations increased between timepoints - e.g. AER T23 (conc_ppmv_corr) = [AER T23 (conc_ppmv) - AER T22 (conc_ppmv)] + AER T22 (conc_ppmv_corr); AER T27 (conc_ppmv_corr) = [AER T27 (conc_ppmv) - AER T26 (conc_ppmv) + AER T26 (conc_ppmv_corr)]
+
+# Correct AER CO2 data for: jar dilution errors that occurred at AER T19 (day 99)
+for (i in 1:length(fil_aer_co2$conc_ppmv_corr)){
+  if (fil_aer_co2$timepoint[i] < 19){
+    fil_aer_co2$conc_ppmv_corr[i] <- fil_aer_co2$conc_ppmv[i]}
+  else if (fil_aer_co2$timepoint[i] >= 19 & fil_aer_co2$timepoint[i] < 23){
+    fil_aer_co2$conc_ppmv_corr[i] <- ((((115.6-7)/1000)*(fil_aer_co2$conc_ppmv_corr[i-1]/10^6))/(115.6/1000))*(10^6)}
+  else if (fil_aer_co2$timepoint[i] >= 23){
+    fil_aer_co2$conc_ppmv_corr[i] <- fil_aer_co2$conc_ppmv[i] - fil_aer_co2$conc_ppmv[i-1] + fil_aer_co2$conc_ppmv_corr[i-1]}
+}
+
+# Correct ANA CO2 data for: 1) vial dilutions that occurred at ANA T11 (day 40), ANA T12 (day 47), ANA T13 (day 54); 2) missing data at ANA T18 (day 90) and ANA T29 (day 195) - fyi, ANA T29 was taken care of by jar dilution corrections; and 3) jar dilutions that occurred at ANA T27 (day 167)
+for (i in 1:length(fil_ana_co2$conc_ppmv_corr)){
+  if (fil_ana_co2$timepoint[i] < 27 & fil_ana_co2$timepoint[i] != 11 & fil_ana_co2$timepoint[i] != 12 & fil_ana_co2$timepoint[i] != 13 & fil_ana_co2$timepoint[i] != 18){
+    fil_ana_co2$conc_ppmv_corr[i] <- fil_ana_co2$conc_ppmv[i]}
+  else if (fil_ana_co2$timepoint[i] == 11 | fil_ana_co2$timepoint[i] == 12 | fil_ana_co2$timepoint[i] == 13 | fil_ana_co2$timepoint[i] == 18 | fil_ana_co2$timepoint[i] >= 27 & fil_ana_co2$timepoint[i] < 31){
+    fil_ana_co2$conc_ppmv_corr[i] <- ((((115.6-7)/1000)*(fil_ana_co2$conc_ppmv_corr[i-1]/10^6))/(115.6/1000))*(10^6)}
+  else if (fil_ana_co2$timepoint[i] >= 31){
+    fil_ana_co2$conc_ppmv_corr[i] <- fil_ana_co2$conc_ppmv[i] - fil_ana_co2$conc_ppmv[i-1] + fil_ana_co2$conc_ppmv_corr[i-1]}
+}
+
+# Correct AER CH4 data for: NA
+for (i in 1:length(fil_aer_ch4$conc_ppmv_corr)){
+  fil_aer_ch4$conc_ppmv_corr[i] <- fil_aer_ch4$conc_ppmv[i]}
+
+# Correct ANA CH4 data for: vial dilutions that occurred at ANA T11 (day 40), ANA T12 (day 47), ANA T13 (day 54); and missing data at ANA T18 (day 90) and ANA T29 (day 195)
+for (i in 1:length(fil_ana_ch4$conc_ppmv_corr)){
+  if (fil_ana_ch4$timepoint[i] != 11 & fil_ana_ch4$timepoint[i] != 12 & fil_ana_ch4$timepoint[i] != 13 & fil_ana_ch4$timepoint[i] != 18 & fil_ana_ch4$timepoint[i] != 29){
+    fil_ana_ch4$conc_ppmv_corr[i] <- fil_ana_ch4$conc_ppmv[i]}
+  else {
+    fil_ana_ch4$conc_ppmv_corr[i] <- ((((115.6-7)/1000)*(fil_ana_ch4$conc_ppmv_corr[i-1]/10^6))/(115.6/1000))*(10^6)}
+}
+
+# combine the filtered data frames, join them with inc_df2
+inc_df2 <- full_join(fil_aer_co2, fil_ana_co2) %>% 
+  full_join(fil_aer_ch4) %>%
+  full_join(fil_ana_ch4) %>%
+  left_join(inc_df2)
+
+```
+
+
+##### 7. Determine the total volume of air in the headspace of each jar, and calculate the total amount of CO~2~ and CH~4~ in the headspace
+
+  * First, determine the total volume of air in the headspace of each jar  
+    * Total volume air = volume jar - volume soil - volume soil water
+    * Volume of soil will be calculated based on estimated particle density (Dp or dp) values from the literature. Particle densities will be used in place of the bulk densities collected by Josi at the time of sampling - this is because transport and movement of the soil samples prior to the incubations altered the bulk densities from what was initially measured at the time of core sampling.
+    
+    * A column was added to Josi's data (josi_data spreadsheets = vc_sed_data and bh_sed_data) that converts TOC to SOM. This was done to get an estimate of which particle density value to use for each depth (2.65 g/cm3 for mineral soils, or 1.50 g/cm3 for peat-heavy soils) -- "About 58% of the mass of organic matter exists as carbon. We can estimate the percentage of SOM from the SOC% using the conversion factor 1.72 (derived from 100/58): Organic matter (%) = total organic carbon (%) x 1.72. This conversion factor can vary in different soils, but 1.72 provides a reasonable estimate of SOM for most purposes." https://www.agric.wa.gov.au/measuring-and-assessing-soils/what-soil-organic-carbon
+  
+    * Particle density (Dp) values were selected from the following studies in order to calculate the total volume of dry soil in each jar. Dp of mineral soils was estimated to be 2.65 g/cm3 - this was applied to all soil depths that had TOC <= 5.8% (SOM <= 10%) as noted in Josi's spreadsheets, because these would be considered mineral soils (this is likely a high SOM limit because mineral soils are often noted as having 5% SOM, but because these are peat soils, applying a fully peat Dp of 1.50 g/cm3 to mineral-heavy depths seems extreme). Dp of peat soils was estimated to be 1.50 g/cm3 - this was applied to all soil depths that had SOM > 10%.
+  
+    * Dp of mineral soils (2.65 g/cm3) was drawn from the following papers: 
+      1) Schjønning, P., McBride, R. A., Keller, T., & Obour, P. B. (2017). Predicting soil particle density from clay and soil organic matter contents. Geoderma, 286, 83–87. https://doi.org/10.1016/j.geoderma.2016.10.020 
+      2) Blake, G. R. (2008). Particle Density. Encyclopedia of Earth Sciences Series, Encyclopedia of Earth Sciences Series, 580–581. https://doi.org/10.1201/noe0849338304.ch277
+
+    * Dp of peat soils (1.50 g/cm3) was drawn from the following papers: 
+      1) Faoziah, N., Iskandar, Djajakirana, G., Darmawan, & Sumawinata, B. (2019). On the development of measurement procedure of particle density for peat material. IOP Conference Series: Earth and Environmental Science, 393(1), 1–4. https://doi.org/10.1088/1755-1315/393/1/012056
+      2) Heiskanen, J. (1992). Comparison of three methods for determining the particle density of soil with liquid pycnometers. Communications in Soil Science and Plant Analysis, 23(7–8), 841–846. https://doi.org/10.1080/00103629209368633
+
+  * Second, calculate the total amount of CO~2~ and CH~4~ in the headspace
+    * To determine a running total amount of ghg that was respired by each jar over the course of the incubations, the gas in the jar needs to be corrected for the amount of gas removed from the headspace at each timepoint. This was done in two steps: 
+      1) calculate the amount of ghg that accumulated in the interval between each timepoint (accum_gas_umols[i] = gas_in_jar_umols[i] - gas_remaining_in_jar[i-1]); 
+      2) add the concentration of ghg that accumulated between the time points to the running total of ghg respired up until that point (total_gas_resp_umols[i] = accum_gas_umols[i] + total_gas_resp_umols[i-1])
+    
+    * NOTE: there are two ways to calculate ghg respired that end up at the same result (this analysis will use method # 1):
+      1) accumulated gas in interval between time points = [gas in jar, T2] - [gas remaining in jar at end of day (after 7mL gas removed), T1] --> the benefit of doing it this way is that by creating an extra column for gas_remaining_in_jar, it accounts for the 7mL of sample removed and also provides a way to represent the instantaneous accumulation between time points
+      2) accumulated gas between measured time points = [ghg in jar, T2] - [ghg in jar, T1] + [gas removed, T1]
+
+```{r}
+# --- Determine volume of air in jar headspace ---
+
+# make sure all timepoint values are numeric
+inc_df2 <- inc_df2 %>%
+  mutate(timepoint = as.numeric(timepoint))
+
+# add columns for headspace gas sample volume pulled at each timepoint
+inc_df2 <- inc_df2 %>%
+  mutate(vol_pulled_ml = ifelse(inc_df2$headspace_treatment == "anaerobic" & inc_df2$timepoint <= 4, 5, 7),
+         vol_pulled_l = vol_pulled_ml/1000)
+
+# read in Excel sheet that contains sampling dates and days - cell row ranges were used because this Excel sheet contains written notes at the top
+inc_sample_data <- read_excel(sample_key_data, "Incubation Sample Masses", range = cell_rows(4:136))
+
+# select the columns that pertain to sample ID, gravimetric water content (gwc = mass water / mass dry soil) that was empirically determined at the beginning of the incubations, and the mass of wet soil that was put into each incubation jar; join them (by "sample_ID") to the working inc_df2 
+# add columns for dry soil mass in jar - calculate this by solving for it in the gwc equation [gwc = (mass wet soil - mass dry soil) / mass dry soil] using the sample wet soil mass and the known gwc
+inc_df2 <- inc_df2 %>% 
+  full_join(select(inc_sample_data, 
+                             sample_ID = "Sample ID", 
+                             gwc = "1_Gravimetric water content (mass water / mass dry soil)",
+                             wet_soil_mass_g = "Mass Soil in Jar (g)")) %>%
+  mutate(dry_soil_mass_g = wet_soil_mass_g / (1 + gwc),
+         dry_soil_mass_ug = dry_soil_mass_g * 10^6)
+
+# josi's data contains a column for TOC - approximate calculations were run in this sheet to convert TOC to SOM
+# insert a column for estimated particle density (Dp, or dp). Based on Josi's data spreadsheets (vc_sed_data and bh_sed_data), depths 2 and 3 (60-76cm and 110-117cm, respectively) will use Dp = 1.50 g/cm3 for peat heavy soils, and all other mineral heavy soil depths will use Dp = 2.65 g/cm3
+# dry soil and water volumes are calculated in cm3, but reported in mL because 1g/cm3 = 1mL
+# the average jar volume was empirically measured at 115.6mL of volume when black butyl stoppers were on
+# the Ideal Gas Law, PV = nRT, was used to determine the number of moles (n) of air in each jar; R = 8.3145 ((L*kPa)/(mol*K))
+# to calculate umol gas (CO2 or CH4) in the jars, conc_ppmv_corr of gas (equivalent to: umol gas / mol air) was multiplied by total moles of air in each jar
+# gas is distinguished from air -  air is the overall composite of gases in the headspace of the jar, while gas is greenhouse gas being evaluated in this study (CO2 or CH4)
+
+inc_df2 <- inc_df2 %>%
+  mutate(dp_g_cm3 = ifelse(inc_df2$depth_ID == "02" | inc_df2$depth_ID == "03", 1.50, 2.65),
+         dry_soil_vol_ml = dry_soil_mass_g / dp_g_cm3, 
+         water_vol_ml = gwc * dry_soil_mass_g,
+         air_vol_ml = 115.6 - dry_soil_vol_ml - water_vol_ml,
+         air_vol_l = air_vol_ml / 1000,
+         temp_inc_K = 273.15 + temp_treatment_C,
+         pressure_kpa = 101.325,
+         air_in_jar_mols = (air_vol_l * pressure_kpa) / (8.3145 * temp_inc_K),
+         gas_in_jar_umols = conc_ppmv_corr * air_in_jar_mols,
+         air_removed_mols = (vol_pulled_l * pressure_kpa) / (8.3145 * temp_inc_K),
+         gas_removed_umols = conc_ppmv_corr * air_removed_mols)
+
+
+# --- Determine quantity of ghg respired ---
+
+# to determine a running total of ghg that was respired by each jar over the course of the incubations, the gas in the jar needs to be corrected for the amount of gas removed from the headspace at each timepoint. This was done in two steps: 1) calculate the amount of ghg that accumulated in the interval between each timepoint (accum_gas_umols[i] = gas_in_jar_umols[i] - gas_remaining_in_jar[i-1]); 2) add the concentration of ghg that accumulated between the time points to the running total of ghg respired up until that point (total_gas_resp_umols[i] = accum_gas_umols[i] + total_gas_resp_umols[i-1])
+
+# add columns for: the concentration of gas that remained in the jar immediately after pulling the prior 7mL sample (gas_remaining_in_jar_umols); the amount of gas that accumulated in the interval between that point and the next timepoint when a 7mL sample was taken (accum_gas_umols); and the total gas respired over the course of the incubations (total_gas_resp_umols)
+inc_df2 <- inc_df2 %>%
+  mutate(gas_remaining_in_jar_umols = gas_in_jar_umols - gas_removed_umols,
+         accum_gas_umols = NA, 
+         total_gas_resp_umols = NA)
+
+# begin accumulated gas calculations at T1 (accum_gas_umols at T0 = 0) - jars were flushed at T0 and a sample was taken immediately after, so no gas had accumulated in the jars for the first timepoint
+for(i in 1:length(inc_df2$timepoint)) {
+  inc_df2$accum_gas_umols[i] <- ifelse(inc_df2$timepoint[i] == 0, 0, (inc_df2$gas_in_jar_umols[i] - inc_df2$gas_remaining_in_jar_umols[i-1]))
+  inc_df2$total_gas_resp_umols[i] <- ifelse(inc_df2$timepoint[i] == 0, 0, (inc_df2$accum_gas_umols[i] + inc_df2$total_gas_resp_umols[i-1]))
+  }
+
+# add columns to calculate g and ug of gas (CO2 or CH4), as well as g, ug, and umol of gas as C (C-CO2 or C-CH4) - do this for both the instantaneous accumulation of gas between timepoints (accum_gas) and the total respiration of gas (total_gas_resp) up until that timepoint
+# to calculate total carbon accumulated between timepoints and total carbon respired during incubations (C-CO2 or C-CH4) convert g gas (CO2 or CH4) to g C-CO2. C-CO2 refers to gC released as CO2: (g gas) x (either 12.01g C / 16.04g CH4, or 12.01g C / 44.01g CH4) = gC (C-CO2 or C-CH4)
+# C = 12.01 g/mol, CO2 = 44.01 g/mol, CH4 = 16.04 g/mol
+inc_df2 <- inc_df2 %>%
+  mutate(accum_gas_g = ifelse(inc_df2$gas_sampled == "CO2", 
+                  ((accum_gas_umols / 10^6) * 44.01), 
+                  ((accum_gas_umols / 10^6) * 16.04)),
+        accum_gas_ug = accum_gas_g * 10^6,
+        accum_gas_umolC = accum_gas_umols,
+        accum_gas_gC = 
+           ifelse(inc_df2$gas_sampled == "CO2", 
+                  accum_gas_g * (12.01 / 44.01), 
+                  accum_gas_g * (12.01 / 16.04)),
+        accum_gas_ugC = accum_gas_gC * 10^6,
+        total_gas_resp_g = 
+           ifelse(inc_df2$gas_sampled == "CO2", 
+                  ((total_gas_resp_umols / 10^6) * 44.01), 
+                  ((total_gas_resp_umols / 10^6) * 16.04)),
+         total_gas_resp_ug = total_gas_resp_g * 10^6,
+         total_gas_resp_umolC = total_gas_resp_umols,
+         total_gas_resp_gC = 
+           ifelse(inc_df2$gas_sampled == "CO2", 
+                  total_gas_resp_g * (12.01 / 44.01), 
+                  total_gas_resp_g * (12.01 / 16.04)),
+         total_gas_resp_ugC = total_gas_resp_gC * 10^6)
+
+```
+
+
+##### 8. Extract total soil organic C information from Josi's data and combine it with incubation data
+  * Do this by creating a total organic carbon (TOC) column in inc_df2 with values pulled from Josi's spreadsheets - she expresses TOC as a percent of the dry weight of the soil. This column in inc_df2 (TOC_perc_wt) will average the TOC data from Josi's spreadsheets where multiple values are available, or approximate TOC values using upper and lower depths where values aren't available
+  
+  * NOTES about Josi's data:
+    * TOC (wt%) for some depths was recorded as < 0.10; in order to normalize incubation ghg production by g soil org. carbon, these values were rounded to 0.10
+    * I collected sediment between two depths along the sediment cores for each sample - these are labeled sample_lower_depth_cm and sample_upper_depth_cm in inc_df and inc_df2
+    * The distance between these depths represents about 14-17cm of sediment; differences in distance were due to the amount of sample available for Josi, Susannah, Nancy, and Jen's analyses
+    * Josi took samples at a higher resolution than I did in the VC cores, and a lower resolution than I did in BH cores - labeled "Depth (cm) - Sample Midpoint" in her Excel sheets
+      1) For many of the VC depths that I took sample from, she has 2-3 values for total org. carbon [ TOC (wt%) ]. I will average these for a single TOC value that can better represent the amount of soil that I sampled from; then this value will be divided by 100 and multiplied by the dry_soil_mass_g to obtain the dry soil mass as gC 
+    * For the BH depths that I took sample from, she has 0-1 values for total carbon [ TOC (wt%) ] - I will either use the available TOC value, or if none is available then I will average the values on either side of my sampling depth
+
+```{r}
+# for VC and BH sediment data, round character values ("<  0.10" and "< 0.10") in column TOC (%wt) to 0.10
+for(i in 1:length(vc_sed_data$`TOC (wt%)`)){
+  vc_sed_data$`TOC (wt%)`[i] <- 
+    ifelse(vc_sed_data$`TOC (wt%)`[i] == "<  0.10" | vc_sed_data$`TOC (wt%)`[i] == "< 0.10", 0.10, vc_sed_data$`TOC (wt%)`[i])
+  }
+
+for(i in 1:length(bh_sed_data$`TOC (wt%)`)){
+  bh_sed_data$`TOC (wt%)`[i] <- 
+    ifelse(bh_sed_data$`TOC (wt%)`[i] == "<  0.10" | bh_sed_data$`TOC (wt%)`[i] == "< 0.10", 0.10, bh_sed_data$`TOC (wt%)`[i])
+  }
+
+# create a function that coerces several columns to a specific type
+numeric_fx <- function(df, columns = names(df), coerce_as = as.numeric){
+  df[columns] = lapply(df[columns], coerce_as)
+    df
+}
+
+# convert columns in vc_sed_data and bh_sed_data to the same type so that they can be joined
+vc_sed_data <- numeric_fx(vc_sed_data, c(16:20))
+bh_sed_data <- numeric_fx(bh_sed_data, c(16:20))
+
+# combine josi's two dfs into one, and rename selected columns
+sed_chars <- full_join(vc_sed_data, bh_sed_data) %>%
+  rename(core_ID = "Core ID", depth_cm = "Depth (cm) - Sample Midpoint", TOC_perc_wt = "TOC (wt%)")
+
+# change core IDs so that they match inc_df2 
+for (i in sed_chars$core_ID){
+  if(nchar(i) == 8){
+    sed_chars$core_ID[sed_chars$core_ID == i] <- paste("GSL18_VC_11_", substring(i, 6, 6), sep = "")
+  } else if(nchar(i) == 4) {
+    sed_chars$core_ID[sed_chars$core_ID == i] <- paste("GSL18_DC_BH1", substring(i, 1, 2), substring(i, 4, 4), sep = "_")
+  } else {
+    sed_chars$core_ID[sed_chars$core_ID == i] <- paste("GSL18_DC_BH1", substring(i, 1, 3), substring(i, 5, 5), sep = "_")
+  }
+}
+
+# select a subset of columns to work with from sed_chars
+toc_data <- sed_chars %>%
+  select(core_ID, depth_cm, TOC_perc_wt)
+
+# make sure everything is numeric 
+toc_data <- numeric_fx(toc_data, 2)
+core_depths <- numeric_fx(core_depths, 1:2)
+
+# create two empty lists and append lower and upper depths to them that correspond to inc_df2 depths
+lower_depths <- list()
+upper_depths <- list()
+
+for (i in core_depths$sample_depth_lower_cm){
+  lower_depths <- append(lower_depths, as.numeric(i), after = length(lower_depths))
+}
+
+for (i in core_depths$sample_depth_upper_cm){
+  upper_depths <- append(upper_depths, as.numeric(i), after = length(upper_depths))
+}
+
+# make two new dfs, these will be used to add rows with averaged TOC values - df_toc will be used where Josi has 2-3 values for my sampling depths, df_toc2 will be used where she has 0-1 values for by sampling depths - these will then be combined into one df
+df_toc <- data.frame("sample_depth_lower_cm" = numeric(0), 
+                    "sample_depth_upper_cm" = numeric(0),
+                    "TOC_perc_wt" = numeric(0))
+df_toc2 <- data.frame("sample_depth_lower_cm" = numeric(0), 
+                    "sample_depth_upper_cm" = numeric(0),
+                    "TOC_perc_wt" = numeric(0))
+
+# filter Josi's data where her depths fall between mine, and then average TOC values for those depths
+# append averaged TOC values from Josi's data and their corresponding lower depth measurements from my data to the empty df_toc
+for (i in 1:length(lower_depths)){
+  filtered_rows <- toc_data %>%
+    filter(toc_data$depth_cm >= lower_depths[i] & toc_data$depth_cm <= upper_depths[i])
+  avg_toc <- mean(filtered_rows$TOC_perc_wt)
+  df_toc <- rbind(df_toc[1:i,], c(lower_depths[i], upper_depths[i], avg_toc), make.row.names = FALSE)
+}
+
+# remove the NAs from row 1 of df_tc
+df_toc <- df_toc[-c(1),]
+
+# create a vector for lower depths and upper depths that have NA values in the TOC_perc_wt column of df_toc - these will be used to pull depths with 0-1 values from Josi's DC_BH1 core values
+lower_depths_dc <- c()
+upper_depths_dc <- c()
+for (i in 1:length(df_toc$sample_depth_lower_cm)){
+  if (df_toc$TOC_perc_wt[i] == "NaN"){
+    lower_depths_dc[i] <- df_toc$sample_depth_lower_cm[i]
+    upper_depths_dc[i] <- df_toc$sample_depth_upper_cm[i]
+  }
+}
+
+# remove NA values from the vectors
+lower_depths_dc <- lower_depths_dc[!is.na(lower_depths_dc)]
+upper_depths_dc <- upper_depths_dc[!is.na(upper_depths_dc)]
+
+# sort the toc_data in ascending order so that the match.closest() function [MALDIquant package] can be used on it; then match the values in the vectors above to the closest values in toc_data by index number; average those values for a TOC value and input this into df_toc
+toc_data_sorted <- toc_data[order(toc_data$depth_cm),]
+lower_pos <- match.closest(lower_depths_dc, toc_data_sorted$depth_cm)
+upper_pos <- match.closest(upper_depths_dc, toc_data_sorted$depth_cm)
+for (i in 1:length(lower_pos)){
+  avg_toc <- mean(c(toc_data_sorted$TOC_perc_wt[lower_pos[i]], toc_data_sorted$TOC_perc_wt[upper_pos[i]]))
+  df_toc2 <- rbind(df_toc2[1:i,], c(lower_depths_dc[i], upper_depths_dc[i], avg_toc), make.row.names = FALSE)
+}
+
+# remove the NAs from df_toc and df_toc2 and join them into one df that is sorted by depth
+df_toc <- na.omit(df_toc)
+df_toc2 <- na.omit(df_toc2)
+
+df_all_toc <- full_join(df_toc, df_toc2) %>% 
+  arrange(sample_depth_lower_cm)
+
+# make sure columns in inc_df2 are numeric, then join df_all_toc to inc_df2
+inc_df2 <- inc_df2 %>%
+  numeric_fx(2:3) %>% 
+  left_join(df_all_toc)
+
+```
+
+
+##### 9. Calculate instantaneous respiration, cumulative production, and respiration rates
+  * Convert TOC (wt%) to grams of total soil org. carbon (SOC) - divide TOC (wt%) by 100 and multiply by the dry_soil_mass_g to obtain the dry soil mass as gC 
+    * Note: from this point forward g of total soil organic carbon (used to normalize ghg respiration values) will be referred to as gC
+  
+  * Accumulated (instantaneous) and total (cumulative) respiration will be reported in units of mass of gas (CO2 or CH4) or carbon (C-CO2 or C-CH4) normalized per mass of dry sediment (g) or soil org C (gC); respiration rates will be reported in units of change in mass of gas or carbon per change in time points, normalized per mass of dry sediment (g) or soil org C (gC). For example:
+  resp_rate_ugC_d_g = ( accum_gas_ugC / change in samp_int_day / dry_soil_mass_gC )
+
+```{r}
+# add columns to inc_df2 - soil organic C as mass, accumulated gas between time points, total respiration over the course of the incubations, and respiration rates
+inc_df2 <- inc_df2 %>%
+  mutate(dry_soil_mass_gC = (TOC_perc_wt / 100) * dry_soil_mass_g,
+         dry_soil_mass_ugC = dry_soil_mass_gC * 10^6,
+         
+         # accumulated respiration between time points, normalized by g dry sediment
+         accum_gas_ug_g = accum_gas_ug / dry_soil_mass_g,
+         accum_gas_ug_ug = accum_gas_ug / dry_soil_mass_ug,
+         accum_gas_ugC_g = accum_gas_ugC / dry_soil_mass_g,
+         accum_gas_ugC_ug = accum_gas_ugC / dry_soil_mass_ug,
+         
+         # accumulated respiration between time points, normalized by gC
+         accum_gas_ug_gC = accum_gas_ug / dry_soil_mass_gC,
+         accum_gas_ug_ugC = accum_gas_ug / dry_soil_mass_ugC,
+         accum_gas_ugC_gC = accum_gas_ugC / dry_soil_mass_gC,
+         accum_gas_ugC_ugC = accum_gas_ugC / dry_soil_mass_ugC,
+        
+         # total respiration, normalized by g dry sediment
+         total_gas_resp_ug_g = total_gas_resp_ug / dry_soil_mass_g,
+         total_gas_resp_ug_ug = total_gas_resp_ug / dry_soil_mass_ug,
+         total_gas_resp_ugC_g = total_gas_resp_ugC / dry_soil_mass_g,
+         total_gas_resp_ugC_ug = total_gas_resp_ugC / dry_soil_mass_ug,
+         
+         # total respiration, normalized by gC
+         total_gas_resp_ug_gC = total_gas_resp_ug / dry_soil_mass_gC,
+         total_gas_resp_ug_ugC = total_gas_resp_ug / dry_soil_mass_ugC,
+         total_gas_resp_ugC_gC = total_gas_resp_ugC / dry_soil_mass_gC,
+         total_gas_resp_ugC_ugC = total_gas_resp_ugC / dry_soil_mass_ugC,
+         
+         # daily respiration rate, normalized by g dry sediment
+         resp_rate_ug_d_g = 0,
+         resp_rate_ug_d_ug = 0,
+         resp_rate_ugC_d_g = 0,
+         resp_rate_ugC_d_ug = 0,
+         
+         # daily respiration rate, normalized by gC
+         resp_rate_ug_d_gC = 0,
+         resp_rate_ug_d_ugC = 0,
+         resp_rate_ugC_d_gC = 0,
+         resp_rate_ugC_d_ugC = 0,
+         
+         # hourly respiration rate, normalized by g dry sediment
+         resp_rate_ug_hr_g = 0,
+         resp_rate_ug_hr_ug = 0,
+         resp_rate_ugC_hr_g = 0,
+         resp_rate_ugC_hr_ug = 0,
+         
+         # hourly respiration rate, normalized by gC
+         resp_rate_ug_hr_gC = 0,
+         resp_rate_ug_hr_ugC = 0,
+         resp_rate_ugC_hr_gC = 0,
+         resp_rate_ugC_hr_ugC = 0)
+
+# add a column for sample depth range in meters, this will be used later for graphing - format(round(, 2) nsmall = 2) maintains two decimals for the depths, trimws removes the white space that precedes the single digits
+inc_df2 <- inc_df2 %>%
+  add_column(sample_depth_lower_m = 0, sample_depth_upper_m = 0, .after = "sample_depth_upper_cm") %>%
+  mutate(sample_depth_lower_m = trimws(format(round((sample_depth_lower_cm / 100), 2), nsmall = 2)), 
+         sample_depth_upper_m = trimws(format(round((sample_depth_upper_cm / 100), 2), nsmall = 2))) %>%
+  unite("sample_depth_range_m", "sample_depth_lower_m":"sample_depth_upper_m", sep = "-")
+
+# calculate respiration rates
+for(i in 1:length(inc_df2$dry_soil_mass_gC)){
+  # resp_rate_ug_d_g column pertains to the change in ug (CO2 or CH4) respired per g dry sediment, per change in days between time points
+  # resp_rate_ug_d_gC column pertains to the change in ug (CO2 or CH4) respired per gC in the soil, per change in days between time points
+  inc_df2$resp_rate_ug_d_g[i] <- 
+    ifelse(inc_df2$timepoint[i] == 0, 0, 
+           (inc_df2$accum_gas_ug_g[i] / (inc_df2$samp_int_day[i] - inc_df2$samp_int_day[i-1])))
+  inc_df2$resp_rate_ug_d_gC[i] <- 
+    ifelse(inc_df2$timepoint[i] == 0, 0, 
+           (inc_df2$accum_gas_ug_gC[i] / (inc_df2$samp_int_day[i] - inc_df2$samp_int_day[i-1])))
+  
+  # resp_rate_ug_d_ug column pertains to the change in ug (CO2 or CH4) respired per ug dry sediment, per change in days between time points
+  # resp_rate_ug_d_ugC column pertains to the change in ug (CO2 or CH4) respired per ugC in the soil, per change in days between time points 
+  inc_df2$resp_rate_ug_d_ug[i] <- 
+    ifelse(inc_df2$timepoint[i] == 0, 0, 
+           (inc_df2$accum_gas_ug_ug[i] / (inc_df2$samp_int_day[i] - inc_df2$samp_int_day[i-1])))
+  inc_df2$resp_rate_ug_d_ugC[i] <- 
+    ifelse(inc_df2$timepoint[i] == 0, 0, 
+           (inc_df2$accum_gas_ug_ugC[i] / (inc_df2$samp_int_day[i] - inc_df2$samp_int_day[i-1])))
+
+  # resp_rate_ugC_d_g column pertains to the change in ugC (C-CO2 or C-CH4) respired per g dry sediment, per change in days between time points
+  # resp_rate_ugC_d_gC column pertains to the change in ugC (C-CO2 or C-CH4) respired per gC in the soil, per change in days between time points
+  inc_df2$resp_rate_ugC_d_g[i] <- 
+    ifelse(inc_df2$timepoint[i] == 0, 0, 
+           (inc_df2$accum_gas_ugC_g[i] / (inc_df2$samp_int_day[i] - inc_df2$samp_int_day[i-1])))
+  inc_df2$resp_rate_ugC_d_gC[i] <- 
+    ifelse(inc_df2$timepoint[i] == 0, 0, 
+           (inc_df2$accum_gas_ugC_gC[i] / (inc_df2$samp_int_day[i] - inc_df2$samp_int_day[i-1])))
+
+  # resp_rate_ugC_d_ug column pertains to the change in ugC (C-CO2 or C-CH4) respired per ug dry sediment, per change in days between time points
+  # resp_rate_ugC_d_ugC column pertains to the change in ugC (C-CO2 or C-CH4) respired per ugC in the soil, per change in days between time points
+  inc_df2$resp_rate_ugC_d_ug[i] <- 
+    ifelse(inc_df2$timepoint[i] == 0, 0, 
+           (inc_df2$accum_gas_ugC_ug[i] / (inc_df2$samp_int_day[i] - inc_df2$samp_int_day[i-1])))
+  inc_df2$resp_rate_ugC_d_ugC[i] <- 
+    ifelse(inc_df2$timepoint[i] == 0, 0, 
+           (inc_df2$accum_gas_ugC_ugC[i] / (inc_df2$samp_int_day[i] - inc_df2$samp_int_day[i-1])))
+
+  # resp_rate_ug_hr_g column pertains to the change in ug (CO2 or CH4) respired per g dry sediment, per change in hours between time points
+  # resp_rate_ug_hr_gC column pertains to the change in ug (CO2 or CH4) respired per gC in the soil, per change in hours between time points
+  inc_df2$resp_rate_ug_hr_g[i] <- (inc_df2$resp_rate_ug_d_g[i] / 24)
+  inc_df2$resp_rate_ug_hr_gC[i] <- (inc_df2$resp_rate_ug_d_gC[i] / 24)
+
+  # resp_rate_ug_hr_ug column pertains to the change in ug (CO2 or CH4) respired per ug dry sediment, per change in hours between time points
+  # resp_rate_ug_hr_ugC column pertains to the change in ug (CO2 or CH4) respired per ugC in the soil, per change in hours between time points 
+  inc_df2$resp_rate_ug_hr_ug[i] <- (inc_df2$resp_rate_ug_d_ug[i] / 24)
+  inc_df2$resp_rate_ug_hr_ugC[i] <- (inc_df2$resp_rate_ug_d_ugC[i] / 24)
+  
+  # resp_rate_ugC_hr_g column pertains to the change in ugC (C-CO2 or C-CH4) respired per g dry sediment, per change in hours between time points
+  # resp_rate_ugC_hr_gC column pertains to the change in ugC (C-CO2 or C-CH4) respired per gC in the soil, per change in hours between time points
+  inc_df2$resp_rate_ugC_hr_g[i] <- (inc_df2$resp_rate_ugC_d_g[i] / 24)
+  inc_df2$resp_rate_ugC_hr_gC[i] <- (inc_df2$resp_rate_ugC_d_gC[i] / 24)
+
+  # resp_rate_ugC_hr_ug column pertains to the change in ugC (C-CO2 or C-CH4) respired per ug dry sediment, per change in hours between time points
+  # resp_rate_ugC_hr_ugC column pertains to the change in ugC (C-CO2 or C-CH4) respired per ugC in the soil, per change in hours between time points 
+  inc_df2$resp_rate_ugC_hr_ug[i] <- (inc_df2$resp_rate_ugC_d_ug[i] / 24)
+  inc_df2$resp_rate_ugC_hr_ugC[i] <- (inc_df2$resp_rate_ugC_d_ugC[i] / 24)
+}
+
+```
+
+
+##### 10. Create a summarized df with averages and standard errors of replicates
+  * Averages and standard errors will be calculated for analytical temperature replicates 1-3 (4C), 4-6 (10C), and 7-9 (20C) at each depth and timepoint
+  
+  * NOTES: 
+    * The summary columns (avg_ and se_) pertain to averaged values across replicates, i.e. rep 1 = mean(reps 1-3), rep 4 = mean(reps 4-6), rep 7 = mean(reps 7-9) at each sampling timepoint
+    * Rows and columns that do not pertain to averaged summary stats will be removed from this dataframe
+
+```{r}
+# create a summary df
+summ_vals <- inc_df2
+
+summ_vals <- summ_vals[order(summ_vals$depth_ID, summ_vals$timepoint),] %>%
+  mutate(avg_total_gas_resp_umolC = NA,
+         se_total_gas_resp_umolC = NA,
+         avg_total_gas_resp_ugC = NA,
+         se_total_gas_resp_ugC = NA,
+         
+         avg_total_gas_resp_ugC_g = NA,
+         se_total_gas_resp_ugC_g = NA,
+         avg_total_gas_resp_ugC_gC = NA,
+         se_total_gas_resp_ugC_gC = NA,
+         
+         avg_total_gas_resp_ugC_ug = NA,
+         se_total_gas_resp_ugC_ug = NA,
+         avg_total_gas_resp_ugC_ugC = NA,
+         se_total_gas_resp_ugC_ugC = NA,
+         
+         avg_resp_rate_ugC_d_g = NA,
+         se_resp_rate_ugC_d_g = NA,
+         avg_resp_rate_ugC_d_gC = NA,
+         se_resp_rate_ugC_d_gC = NA,
+         
+         avg_resp_rate_ugC_d_ug = NA,
+         se_resp_rate_ugC_d_ug = NA,
+         avg_resp_rate_ugC_d_ugC = NA,
+         se_resp_rate_ugC_d_ugC = NA,
+
+         avg_resp_rate_ugC_hr_g = NA,
+         se_resp_rate_ugC_hr_g = NA,         
+         avg_resp_rate_ugC_hr_gC = NA,
+         se_resp_rate_ugC_hr_gC = NA,
+         
+         avg_resp_rate_ugC_hr_ug = NA,
+         se_resp_rate_ugC_hr_ug = NA,
+         avg_resp_rate_ugC_hr_ugC = NA,
+         se_resp_rate_ugC_hr_ugC = NA)
+
+# create functions that pull out summary statistics - averages and standard errors
+# standard error is calculated as [ standard deviation / sqrt(n) ], where n = # replicates (e.g 1-3 = 3) 
+# can't use "$" to subset data frames within functions, because it will locate the object col_name but won't call it - use "[[ ]]" instead
+rep_avg <- function(df, col_name, i){
+  avg <- mean(c(df[[col_name]][i], df[[col_name]][i+1], df[[col_name]][i+2]))
+  return(avg)
+}
+
+rep_se <- function(df, col_name, i){
+  se <- sd(c(df[[col_name]][i], df[[col_name]][i+1], df[[col_name]][i+2])) / sqrt(3)
+  return(se)
+}
+
+# populate summ_vals with means and standard errors of replicates 1-3, 4-6, 7-9
+for (i in 1:length(summ_vals$avg_total_gas_resp_umolC)){
+  if (summ_vals$replicate[i] == 1 | summ_vals$replicate[i] == 4 | summ_vals$replicate[i] == 7){
+    
+    # average and find the standard error for the column: total_gas_resp_umolC
+    summ_vals$avg_total_gas_resp_umolC[i] <- rep_avg(summ_vals, "total_gas_resp_umolC", i)
+    summ_vals$se_total_gas_resp_umolC[i] <- rep_se(summ_vals, "total_gas_resp_umolC", i)
+    
+    # average and find the standard error for the column: total_gas_resp_ugC
+    summ_vals$avg_total_gas_resp_ugC[i] <- rep_avg(summ_vals, "total_gas_resp_ugC", i)
+    summ_vals$se_total_gas_resp_ugC[i] <- rep_se(summ_vals, "total_gas_resp_ugC", i)
+    
+    # average and find the standard error for the column: total_gas_resp_ugC_g
+    summ_vals$avg_total_gas_resp_ugC_g[i] <- rep_avg(summ_vals, "total_gas_resp_ugC_g", i)
+    summ_vals$se_total_gas_resp_ugC_g[i] <- rep_se(summ_vals, "total_gas_resp_ugC_g", i)
+    
+    # average and find the standard error for the column: total_gas_resp_ugC_gC
+    summ_vals$avg_total_gas_resp_ugC_gC[i] <- rep_avg(summ_vals, "total_gas_resp_ugC_gC", i)
+    summ_vals$se_total_gas_resp_ugC_gC[i] <- rep_se(summ_vals, "total_gas_resp_ugC_gC", i)
+    
+    # average and find the standard error for the column: total_gas_resp_ugC_ug
+    summ_vals$avg_total_gas_resp_ugC_ug[i] <- rep_avg(summ_vals, "total_gas_resp_ugC_ug", i)
+    summ_vals$se_total_gas_resp_ugC_ug[i] <- rep_se(summ_vals, "total_gas_resp_ugC_ug", i)
+    
+    # average and find the standard error for the column: total_gas_resp_ugC_ugC
+    summ_vals$avg_total_gas_resp_ugC_ugC[i] <- rep_avg(summ_vals, "total_gas_resp_ugC_ugC", i)
+    summ_vals$se_total_gas_resp_ugC_ugC[i] <- rep_se(summ_vals, "total_gas_resp_ugC_ugC", i)
+    
+    # average and find the standard error for the column: resp_rate_ugC_d_g
+    summ_vals$avg_resp_rate_ugC_d_g[i] <- rep_avg(summ_vals, "resp_rate_ugC_d_g", i)
+    summ_vals$se_resp_rate_ugC_d_g[i] <- rep_se(summ_vals, "resp_rate_ugC_d_g", i)
+    
+    # average and find the standard error for the column: resp_rate_ugC_d_gC 
+    summ_vals$avg_resp_rate_ugC_d_gC[i] <- rep_avg(summ_vals, "resp_rate_ugC_d_gC", i)
+    summ_vals$se_resp_rate_ugC_d_gC[i] <- rep_se(summ_vals, "resp_rate_ugC_d_gC", i)
+    
+    # average and find the standard error for the column: resp_rate_ugC_d_ug 
+    summ_vals$avg_resp_rate_ugC_d_ug[i] <- rep_avg(summ_vals, "resp_rate_ugC_d_ug", i)
+    summ_vals$se_resp_rate_ugC_d_ug[i] <- rep_se(summ_vals, "resp_rate_ugC_d_ug", i)
+    
+    # average and find the standard error for the column: resp_rate_ugC_d_ugC 
+    summ_vals$avg_resp_rate_ugC_d_ugC[i] <- rep_avg(summ_vals, "resp_rate_ugC_d_ugC", i)
+    summ_vals$se_resp_rate_ugC_d_ugC[i] <- rep_se(summ_vals, "resp_rate_ugC_d_ugC", i)
+    
+    # average and find the standard error for the column: resp_rate_ugC_hr_g
+    summ_vals$avg_resp_rate_ugC_hr_g[i] <- rep_avg(summ_vals, "resp_rate_ugC_hr_g", i)
+    summ_vals$se_resp_rate_ugC_hr_g[i] <- rep_se(summ_vals, "resp_rate_ugC_hr_g", i)
+    
+    # average and find the standard error for the column: resp_rate_ugC_hr_gC
+    summ_vals$avg_resp_rate_ugC_hr_gC[i] <- rep_avg(summ_vals, "resp_rate_ugC_hr_gC", i)
+    summ_vals$se_resp_rate_ugC_hr_gC[i] <- rep_se(summ_vals, "resp_rate_ugC_hr_gC", i)
+    
+    # average and find the standard error for the column: resp_rate_ugC_hr_ug
+    summ_vals$avg_resp_rate_ugC_hr_ug[i] <- rep_avg(summ_vals, "resp_rate_ugC_hr_ug", i)
+    summ_vals$se_resp_rate_ugC_hr_ug[i] <- rep_se(summ_vals, "resp_rate_ugC_hr_ug", i)
+
+    # average and find the standard error for the column: resp_rate_ugC_hr_ugC
+    summ_vals$avg_resp_rate_ugC_hr_ugC[i] <- rep_avg(summ_vals, "resp_rate_ugC_hr_ugC", i)
+    summ_vals$se_resp_rate_ugC_hr_ugC[i] <- rep_se(summ_vals, "resp_rate_ugC_hr_ugC", i)
+  }
+}
+
+# Remove NA values from summ_vals df - this will get rid of all replicate rows that are not reps 1, 4, 7 
+# Rename replicates to represent averages between the sets of three reps
+# Remove columns that are not specific to average replicate values
+summ_vals <- summ_vals %>% 
+  filter(!is.na(avg_total_gas_resp_umolC)) %>% 
+  mutate(replicate = ifelse(replicate == 1, "1-3", ifelse(replicate == 4, "4-6", "7-9"))) %>%
+  select(core_ID:temp_treatment_C, depth_ID:gas_sampled, avg_total_gas_resp_umolC:se_resp_rate_ugC_hr_ugC) %>%
+  arrange(headspace_treatment, desc(gas_sampled), depth_ID, replicate)
+```
+
+
+##### 11. Create plots for total respiration - anaerobic and aerobic
+
+```{r}
+# Should really create a plot theme... ah well
+
+# never use $ in aes() - it breaks associations with the plot
+# factor distinguishes points as discrete not continuous in terms of their aesthetic (color, linetype)
+# group = interaction() distinguishes groups of points (in this case depths+replicates) by their aesthetic value (color, linetype); use this when a group isn’t defined by a single variable, but instead by a combination of multiple variables, e.g. aes(group = interaction(school_id, student_id))
+# can add  "+ facet_wrap(vars(depth_ID), ncol = 3)" to look at depth values individually
+# geom_point() produces a scatterplot and understands the aes "shape"
+# geom_line() understands the aes "linetype", which maps a categorical variable to solid, dotted, and dashed lines
+# p <- ggplot(df, aes(x, y, label = label)) + 
+  # labs(x = NULL, y = NULL) + #Hides axis label
+  # theme(plot.title = element_text(size = 12)) #Shrinks plot title
+# p + geom_line() + ggtitle("line")
+# to plot a certain range of days, use: %>% filter(gas_sampled == [ ] & headspace_treatment == [ ] & samp_int_day < [ ] & samp_int_day > [ ]) %>%
+
+
+# add more colors to plots - 1) choose a classic R color palette, list its usual number of colors and palette identifier, 2) add more colors "(12)" to this palette; can then plot it using " + scale_color_manual(values = col_pal)"
+col_pal <- brewer.pal(8, "Accent") 
+col_pal <- colorRampPalette(col_pal)(12)
+
+
+# --------  ANAEROBIC DATA: CUMULATIVE GAS RESPIRED THROUGHOUT INCUBATION  --------
+
+# --- ANAEROBIC CO2 ---
+
+# plot 12 months of ANAEROBIC C-CO2 data
+# not normalized
+plt_ana_co2 <- inc_df2 %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "anaerobic") %>%
+  ggplot(aes(y = total_gas_resp_ugC, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, replicate))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Cumulative anaerobic C-CO2 respired", subtitle = "Not normalized",
+       y = "Cumulative C-CO2 Respired (ugC-CO2)", x = "Sampling Interval (days)",
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_ana_co2)
+
+# plot 12 months of ANAEROBIC C-CO2 data
+# normalized by g sediment
+plt_ana_co2_g <- inc_df2 %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "anaerobic") %>%
+  ggplot(aes(y = total_gas_resp_ugC_g, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, replicate))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Cumulative anaerobic C-CO2 respired", subtitle = "Normalized by g sediment", 
+       y = "Cumulative C-CO2 Respired (ugC-CO2/g sed)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_ana_co2_g)
+
+# plot 12 months of ANAEROBIC C-CO2 data
+# normalized by g SOC
+plt_ana_co2_gC <- inc_df2 %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "anaerobic") %>%
+  ggplot(aes(y = total_gas_resp_ugC_gC, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, replicate))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Cumulative anaerobic C-CO2 respired", subtitle = "Normalized by g SOC", 
+       y = "Cumulative C-CO2 Respired (ugC-CO2/g SOC)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_ana_co2_gC)
+
+# plot 12 months of AVG. ANAEROBIC C-CO2 data using replicate values
+# not normalized
+plt_avg_ana_co2 <- summ_vals %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "anaerobic") %>% 
+  ggplot(aes(y = avg_total_gas_resp_ugC, x = samp_int_day, 
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C), 
+             group = interaction(sample_depth_range_m, temp_treatment_C))) + 
+  geom_line() + 
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_total_gas_resp_ugC - se_total_gas_resp_ugC, ymax = avg_total_gas_resp_ugC + se_total_gas_resp_ugC), width = 0.2) +
+  labs(title = "Cumulative anaerobic C-CO2 respired", subtitle = "Replicate averages, not normalized", 
+       y = "Cumulative C-CO2 Respired (ugC-CO2)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_ana_co2)
+
+# plot 12 months of AVG. ANAEROBIC C-CO2 data using replicate values
+# normalized by g sediment
+plt_avg_ana_co2_g <- summ_vals %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "anaerobic") %>%
+  ggplot(aes(y = avg_total_gas_resp_ugC_g, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_total_gas_resp_ugC_g - se_total_gas_resp_ugC_g, ymax = avg_total_gas_resp_ugC_g + se_total_gas_resp_ugC_g), width = 0.2) +
+  labs(title = "Cumulative anaerobic C-CO2 respired", subtitle = "Replicate averages, normalized by g sediment",
+       y = "Cumulative C-CO2 Respired (ugC-CO2/g sed)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_ana_co2_g)
+
+# plot 12 months of AVG. ANAEROBIC C-CO2 data using replicate values
+# normalized by g SOC
+plt_avg_ana_co2_gC <- summ_vals %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "anaerobic") %>%
+  ggplot(aes(y = avg_total_gas_resp_ugC_gC, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_total_gas_resp_ugC_gC - se_total_gas_resp_ugC_gC, ymax = avg_total_gas_resp_ugC_gC + se_total_gas_resp_ugC_gC), width = 0.2) +
+  labs(title = "Cumulative anaerobic C-CO2 respired", subtitle =  "Replicate averages, normalized by g SOC", 
+       y = "Cumulative C-CO2 Respired (ugC-CO2/g SOC)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_ana_co2_gC)
+
+
+# --- ANAEROBIC CH4 ---
+
+# plot 12 months of ANAEROBIC C-CH4 data
+# not normalized
+plt_ana_ch4 <- inc_df2 %>% 
+  filter(gas_sampled == "CH4" & headspace_treatment == "anaerobic") %>% 
+  ggplot(aes(y = total_gas_resp_ugC, x = samp_int_day, 
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, replicate))) + 
+  geom_line() + 
+  geom_point() +
+  labs(title = "Cumulative anaerobic C-CH4 respired", subtitle = "Not normalized", 
+       y = "Cumulative C-CH4 Respired (ugC-CH4)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_ana_ch4)
+
+# plot 12 months of ANAEROBIC C-CH4 data
+# normalized by g sediment
+plt_ana_ch4_g <- inc_df2 %>%
+  filter(gas_sampled == "CH4" & headspace_treatment == "anaerobic") %>%
+  ggplot(aes(y = total_gas_resp_ugC_g, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, replicate))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Cumulative anaerobic C-CH4 respired", subtitle = "Normalized by g sediment", 
+       y = "Cumulative C-CH4 Respired (ugC-CH4/g sed)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_ana_ch4_g)
+
+# plot 12 months of ANAEROBIC C-CH4 data
+# normalized by g SOC
+plt_ana_ch4_gC <- inc_df2 %>%
+  filter(gas_sampled == "CH4" & headspace_treatment == "anaerobic") %>%
+  ggplot(aes(y = total_gas_resp_ugC_gC, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, replicate))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Cumulative anaerobic C-CH4 respired", subtitle = "Normalized by g SOC", 
+       y = "Cumulative C-CH4 Respired (ugC-CH4/g SOC)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_ana_ch4_gC)
+
+# plot 12 months of AVG. ANAEROBIC C-CH4 data using replicate values
+# not normalized 
+plt_avg_ana_ch4 <- summ_vals %>%
+  filter(gas_sampled == "CH4" & headspace_treatment == "anaerobic") %>% 
+  ggplot(aes(y = avg_total_gas_resp_ugC, x = samp_int_day, 
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C), 
+             group = interaction(sample_depth_range_m, temp_treatment_C))) + 
+  geom_line() + 
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_total_gas_resp_ugC - se_total_gas_resp_ugC, ymax = avg_total_gas_resp_ugC + se_total_gas_resp_ugC), width = 0.2) +
+  labs(title = "Cumulative anaerobic C-CH4 respired", subtitle = "Replicate averages, not normalized", 
+       y = "Cumulative C-CH4 Respired (ugC-CH4)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_ana_ch4)
+
+# plot 12 months of AVG. ANAEROBIC C-CH4 data using replicate values
+# normalized by g sediment
+plt_avg_ana_ch4_g <- summ_vals %>%
+  filter(gas_sampled == "CH4" & headspace_treatment == "anaerobic") %>%
+  ggplot(aes(y = avg_total_gas_resp_ugC_g, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_total_gas_resp_ugC_g - se_total_gas_resp_ugC_g, ymax = avg_total_gas_resp_ugC_g + se_total_gas_resp_ugC_g), width = 0.2) +
+  labs(title = "Cumulative anaerobic C-CH4 respired", subtitle = "Replicate averages, normalized by g sediment",
+       y = "Cumulative C-CH4 Respired (ugC-CH4/g sed)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_ana_ch4_g)
+
+# plot 12 months of AVG. ANAEROBIC C-CH4 data using replicate values
+# normalized by g SOC
+plt_avg_ana_ch4_gC <- summ_vals %>%
+  filter(gas_sampled == "CH4" & headspace_treatment == "anaerobic") %>%
+  ggplot(aes(y = avg_total_gas_resp_ugC_gC, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_total_gas_resp_ugC_gC - se_total_gas_resp_ugC_gC, ymax = avg_total_gas_resp_ugC_gC + se_total_gas_resp_ugC_gC), width = 0.2) +
+  labs(title = "Cumulative anaerobic C-CH4 respired", subtitle = "Replicate averages, normalized by g SOC", 
+       y = "Cumulative C-CH4 Respired (ugC-CH4/g SOC)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_ana_ch4_gC)
+
+# --------  AEROBIC DATA: CUMULATIVE GAS RESPIRED THROUGHOUT INCUBATION  --------
+
+# --- AEROBIC CO2 ---
+
+# plot 12 months of AEROBIC C-CO2 data
+# not normalized
+plt_aer_co2 <- inc_df2 %>% 
+  filter(gas_sampled == "CO2" & headspace_treatment == "aerobic") %>% 
+  ggplot(aes(y = total_gas_resp_ugC, x = samp_int_day, 
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, replicate))) + 
+  geom_line() + 
+  geom_point() +
+  labs(title = "Cumulative aerobic C-CO2 respired", subtitle = "Not normalized", 
+       y = "Cumulative C-CO2 Respired (ugC-CO2)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_aer_co2)
+
+# plot 12 months of AEROBIC C-CO2 data
+# normalized by g sediment
+plt_aer_co2_g <- inc_df2 %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "aerobic") %>%
+  ggplot(aes(y = total_gas_resp_ugC_g, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, replicate))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Cumulative aerobic C-CO2 respired", subtitle = "Normalized by g sediment", 
+       y = "Cumulative C-CO2 Respired (ugC-CO2/g sed)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_aer_co2_g)
+
+# plot 12 months of AEROBIC C-CO2 data
+# normalized by g SOC
+plt_aer_co2_gC <- inc_df2 %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "aerobic") %>%
+  ggplot(aes(y = total_gas_resp_ugC_gC, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, replicate))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Cumulative aerobic C-CO2 respired", subtitle = "Normalized by g SOC", 
+       y = "Cumulative C-CO2 Respired (ugC-CO2/g SOC)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_aer_co2_gC)
+
+# plot 12 months of AVG. AEROBIC C-CO2 data using replicate values
+# not normalized
+plt_avg_aer_co2 <- summ_vals %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "aerobic") %>% 
+  ggplot(aes(y = avg_total_gas_resp_ugC, x = samp_int_day, 
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C), 
+             group = interaction(sample_depth_range_m, temp_treatment_C))) + 
+  geom_line() + 
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_total_gas_resp_ugC - se_total_gas_resp_ugC, ymax = avg_total_gas_resp_ugC + se_total_gas_resp_ugC), width = 0.2) +
+  labs(title = "Cumulative aerobic C-CO2 respired", subtitle = "Replicate averages, not normalized", 
+       y = "Cumulative C-CO2 Respired (ugC-CO2)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_aer_co2)
+
+# plot 12 months of AVG. AEROBIC C-CO2 data using replicate values
+# normalized by g sediment
+plt_avg_aer_co2_g <- summ_vals %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "aerobic") %>%
+  ggplot(aes(y = avg_total_gas_resp_ugC_g, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_total_gas_resp_ugC_g - se_total_gas_resp_ugC_g, ymax = avg_total_gas_resp_ugC_g + se_total_gas_resp_ugC_g), width = 0.2) +
+  labs(title = "Cumulative aerobic C-CO2 respired", subtitle = "Replicate averages, normalized by g sediment", 
+       y = "Cumulative C-CO2 Respired (ugC-CO2/g sed)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_aer_co2_g)
+
+# plot 12 months of AVG. AEROBIC C-CO2 data using replicate values
+# normalized by g SOC
+plt_avg_aer_co2_gC <- summ_vals %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "aerobic") %>%
+  ggplot(aes(y = avg_total_gas_resp_ugC_gC, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_total_gas_resp_ugC_gC - se_total_gas_resp_ugC_gC, ymax = avg_total_gas_resp_ugC_gC + se_total_gas_resp_ugC_gC), width = 0.2) +
+  labs(title = "Cumulative aerobic C-CO2 respired", subtitle = "Replicate averages, normalized by g SOC", 
+       y = "Cumulative C-CO2 Respired (ugC-CO2/g SOC)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_aer_co2_gC)
+
+
+# --- AEROBIC CH4 ---
+
+# plot 12 months of AEROBIC C-CH4 data
+# not normalized
+plt_aer_ch4 <- inc_df2 %>% 
+  filter(gas_sampled == "CH4" & headspace_treatment == "aerobic") %>% 
+  ggplot(aes(y = total_gas_resp_ugC, x = samp_int_day, 
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, replicate))) + 
+  geom_line() + 
+  geom_point() +
+  labs(title = "Cumulative aerobic C-CH4 respired", subtitle = "Not normalized", 
+       y = "Cumulative C-CH4 Respired (ugC-CH4)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_aer_ch4)
+
+# plot 12 months of AEROBIC C-CH4 data
+# normalized by g sediment
+plt_aer_ch4_g <- inc_df2 %>%
+  filter(gas_sampled == "CH4" & headspace_treatment == "aerobic") %>%
+  ggplot(aes(y = total_gas_resp_ugC_g, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, replicate))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Cumulative aerobic C-CH4 respired", subtitle = "Normalized by g sediment", 
+       y = "Cumulative C-CH4 Respired (ugC-CH4/g sed)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_aer_ch4_g)
+
+# plot 12 months of AEROBIC C-CH4 data
+# normalized by g SOC
+plt_aer_ch4_gC <- inc_df2 %>%
+  filter(gas_sampled == "CH4" & headspace_treatment == "aerobic") %>%
+  ggplot(aes(y = total_gas_resp_ugC_gC, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, replicate))) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Cumulative aerobic C-CH4 respired", subtitle = "Normalized by g SOC", 
+       y = "Cumulative C-CH4 Respired (ugC-CH4/g SOC)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_aer_ch4_gC)
+
+# plot 12 months of AVG. AEROBIC C-CH4 data using replicate values
+# not normalized
+plt_avg_aer_ch4 <- summ_vals %>%
+  filter(gas_sampled == "CH4" & headspace_treatment == "aerobic") %>% 
+  ggplot(aes(y = avg_total_gas_resp_ugC, x = samp_int_day, 
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C), 
+             group = interaction(sample_depth_range_m, temp_treatment_C))) + 
+  geom_line() + 
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_total_gas_resp_ugC - se_total_gas_resp_ugC, ymax = avg_total_gas_resp_ugC + se_total_gas_resp_ugC), width = 0.2) +
+  labs(title = "Cumulative aerobic C-CH4 respired", subtitle = "Replicate averages, not normalized", 
+       y = "Cumulative C-CH4 Respired (ugC-CH4)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_aer_ch4)
+
+# plot 12 months of AVG. AEROBIC C-CH4 data using replicate values
+# normalized by g sediment
+plt_avg_aer_ch4_g <- summ_vals %>%
+  filter(gas_sampled == "CH4" & headspace_treatment == "aerobic") %>%
+  ggplot(aes(y = avg_total_gas_resp_ugC_g, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_total_gas_resp_ugC_g - se_total_gas_resp_ugC_g, ymax = avg_total_gas_resp_ugC_g + se_total_gas_resp_ugC_g), width = 0.2) +
+  labs(title = "Cumulative aerobic C-CH4 respired", subtitle = "Replicate averages, normalized by g sediment", 
+       y = "Cumulative C-CH4 Respired (ugC-CH4/g sed)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_aer_ch4_g)
+
+# plot 12 months of AVG. AEROBIC C-CH4 data using replicate values
+# normalized by g SOC
+plt_avg_aer_ch4_gC <- summ_vals %>%
+  filter(gas_sampled == "CH4" & headspace_treatment == "aerobic") %>%
+  ggplot(aes(y = avg_total_gas_resp_ugC_gC, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_total_gas_resp_ugC_gC - se_total_gas_resp_ugC_gC, ymax = avg_total_gas_resp_ugC_gC + se_total_gas_resp_ugC_gC), width = 0.2) +
+  labs(title = "Cumulative aerobic C-CH4 respired", subtitle = "Replicate averages, normalized by g SOC", 
+       y = "Cumulative C-CH4 Respired (ugC-CH4/g SOC)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_aer_ch4_gC)
+```
+
+
+##### 12. Create plots for respiration rates - anaerobic and aerobic
+
+```{r}
+# can add  "+ facet_wrap(vars(depth_ID), ncol = 3)" to look at depth values individually
+
+# --------  ANAEROBIC DATA: AVG. RESPIRATION RATES  --------
+
+# plot 12 months of AVG. ANAEROBIC C-CO2 respiration rate (ugC-CO2/d/gC) data using replicate values
+# normalized by g SOC
+plt_avg_resp_rate_ana_CO2_d_gC <- summ_vals %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "anaerobic") %>%
+  ggplot(aes(y = avg_resp_rate_ugC_d_gC, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_resp_rate_ugC_d_gC - se_resp_rate_ugC_d_gC, 
+                    ymax = avg_resp_rate_ugC_d_gC + se_resp_rate_ugC_d_gC), width = 0.2) +
+  labs(title = "Anaerobic C-CO2 respiration rate", subtitle = "Replicate averages, normalized by g SOC",
+       y = "C-CO2 Respiration Rate (ugC-CO2/d/g SOC)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_resp_rate_ana_CO2_d_gC)
+
+# plot 12 months of AVG. ANAEROBIC C-CO2 respiration rate (ugC-CO2/d/g) data using replicate values
+# normalized by g sediment
+plt_avg_resp_rate_ana_CO2_d_g <- summ_vals %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "anaerobic") %>%
+  ggplot(aes(y = avg_resp_rate_ugC_d_g, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_resp_rate_ugC_d_g - se_resp_rate_ugC_d_g, 
+                    ymax = avg_resp_rate_ugC_d_g + se_resp_rate_ugC_d_g), width = 0.2) +
+  labs(title = "Anaerobic C-CO2 respiration rate", subtitle = "Replicate averages, normalized by g sediment",
+       y = "C-CO2 Respiration Rate (ugC-CO2/d/g sed)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_resp_rate_ana_CO2_d_g)
+
+
+# plot 12 months of AVG. ANAEROBIC C-CH4 respiration rate (ugC-CH4/d/gC) data using replicate values
+# normalized by g SOC
+plt_avg_resp_rate_ana_CH4_d_gC <- summ_vals %>%
+  filter(gas_sampled == "CH4" & headspace_treatment == "anaerobic") %>%
+  ggplot(aes(y = avg_resp_rate_ugC_d_gC, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_resp_rate_ugC_d_gC - se_resp_rate_ugC_d_gC, 
+                    ymax = avg_resp_rate_ugC_d_gC + se_resp_rate_ugC_d_gC), width = 0.2) +
+  labs(title = "Anaerobic C-CH4 respiration rate", subtitle = "Replicate averages, normalized by g SOC",
+       y = "C-CH4 Respiration Rate (ugC-CH4/d/g SOC)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_resp_rate_ana_CH4_d_gC)
+
+# plot 12 months of AVG. ANAEROBIC C-CH4 respiration rate (ugC-CH4/d/g) data using replicate values
+# normalized by g sediment
+plt_avg_resp_rate_ana_CH4_d_g <- summ_vals %>%
+  filter(gas_sampled == "CH4" & headspace_treatment == "anaerobic") %>%
+  ggplot(aes(y = avg_resp_rate_ugC_d_g, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_resp_rate_ugC_d_g - se_resp_rate_ugC_d_g, 
+                    ymax = avg_resp_rate_ugC_d_g + se_resp_rate_ugC_d_g), width = 0.2) +
+  labs(title = "Anaerobic C-CH4 respiration rate", subtitle = "Replicate averages, normalized by g sediment",
+       y = "C-CH4 Respiration Rate (ugC-CH4/d/g sed)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_resp_rate_ana_CH4_d_g)
+
+
+# --------  AEROBIC DATA: AVG. RESPIRATION RATES  --------
+
+# plot 12 months of AVG. AEROBIC C-CO2 respiration rate (ugC-CO2/d/gC) data using replicate values
+# normalized by g SOC
+plt_avg_resp_rate_aer_CO2_d_gC <- summ_vals %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "aerobic") %>%
+  ggplot(aes(y = avg_resp_rate_ugC_d_gC, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_resp_rate_ugC_d_gC - se_resp_rate_ugC_d_gC, 
+                    ymax = avg_resp_rate_ugC_d_gC + se_resp_rate_ugC_d_gC), width = 0.2) +
+  labs(title = "Aerobic C-CO2 respiration rate", subtitle = "Replicate averages, normalized by g SOC",
+       y = "C-CO2 Respiration Rate (ugC-CO2/d/g SOC)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_resp_rate_aer_CO2_d_gC)
+
+# plot 12 months of AVG. AEROBIC C-CO2 respiration rate (ugC-CO2/d/g) data using replicate values
+# normalized by g sediment
+plt_avg_resp_rate_aer_CO2_d_g <- summ_vals %>%
+  filter(gas_sampled == "CO2" & headspace_treatment == "aerobic") %>%
+  ggplot(aes(y = avg_resp_rate_ugC_d_g, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_resp_rate_ugC_d_g - se_resp_rate_ugC_d_g, 
+                    ymax = avg_resp_rate_ugC_d_g + se_resp_rate_ugC_d_g), width = 0.2) +
+  labs(title = "Aerobic C-CO2 respiration rate", subtitle = "Replicate averages, normalized by g sediment",
+       y = "C-CO2 Respiration Rate (ugC-CO2/d/g sed)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_resp_rate_aer_CO2_d_g)
+
+# plot 12 months of AVG. AEROBIC C-CH4 respiration rate (ugC-CH4/d/gC) data using replicate values
+# normalized by g SOC
+plt_avg_resp_rate_aer_CH4_d_gC <- summ_vals %>%
+  filter(gas_sampled == "CH4" & headspace_treatment == "aerobic") %>%
+  ggplot(aes(y = avg_resp_rate_ugC_d_gC, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_resp_rate_ugC_d_gC - se_resp_rate_ugC_d_gC, 
+                    ymax = avg_resp_rate_ugC_d_gC + se_resp_rate_ugC_d_gC), width = 0.2) +
+  labs(title = "Aerobic C-CH4 respiration rate", subtitle = "Replicate averages, normalized by g SOC",
+       y = "C-CH4 Respiration Rate (ugC-CH4/d/g SOC)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_resp_rate_aer_CH4_d_gC)
+
+# plot 12 months of AVG. AEROBIC C-CH4 respiration rate (ugC-CH4/d/g) data using replicate values
+# normalized by g sediment
+plt_avg_resp_rate_aer_CH4_d_g <- summ_vals %>%
+  filter(gas_sampled == "CH4" & headspace_treatment == "aerobic") %>%
+  ggplot(aes(y = avg_resp_rate_ugC_d_g, x = samp_int_day,
+             color = sample_depth_range_m, linetype = factor(temp_treatment_C),
+             group = interaction(sample_depth_range_m, temp_treatment_C))) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_resp_rate_ugC_d_g - se_resp_rate_ugC_d_g, 
+                    ymax = avg_resp_rate_ugC_d_g + se_resp_rate_ugC_d_g), width = 0.2) +
+  labs(title = "Aerobic C-CH4 respiration rate", subtitle = "Replicate averages, normalized by g sediment",
+       y = "C-CH4 Respiration Rate (ugC-CH4/d/g sed)", x = "Sampling Interval (days)", 
+       linetype = "Temperature Treatment (C)", color = "Depth (m)") +
+  scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "0.60-0.76",
+                                                    "1.10-1.17",
+                                                    "3.05-3.21",
+                                                    "5.24-5.39",
+                                                    "7.21-7.35",
+                                                    "10.05-10.20",
+                                                    "12.62-12.77",
+                                                    "13.65-13.80",
+                                                    "16.63-16.78",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98"))
+print(plt_avg_resp_rate_aer_CH4_d_g)
+```
+
+
+##### 13. Determine total net C respiration as C-CO2, C-CH4, total C respired, and C-CO2e. Additionally, calculate the percentage of total C respired at various time points during the course of the incubations.
+
+  * Values will be compiled for three timepoints at the beginning of the incubations (~30 days), the middle (~150 days), and the end (~365 days):
+    * ANA CO2 & CH4
+      * 30 days:  26(T8), 28(T9), 33(T10)
+      * 150 days: 134(T24), 139(T25), 154(T26)
+      * 365 days: 323(T35), 350(T36), 365(T37)
+    * AER CO2 & CH4
+      * 30 days:  27(T8), 29(T9), 33(T10)
+      * 150 days: 126(T23), 132(T24), 160(T25)
+      * 365 days: 315(T32), 350(T33), 365(T34)
+
+  * Total C respired will be calculated by adding C-CO2 to C-CH4
+    * This will be used to calculate how much carbon was respired (as a percent of the total respired) at the beginning, middle, and end of incubations
+  
+  * Total C-CO2e will be calculated by adding C-CO2 to C-CH4 (converted to C-CO2 equivalents, C-CO2e)
+    * To convert C-CH4 to C-CO2e, use a GWP of 28 (100 yr time scale, not including feedbacks - per the IPCC AR5 report)
+    * Total C-CO2e = [C-CO2 + C-CH4 (as C-CO2e)]
+  
+  * Percent of total C respired over the course of the incubations will be calculated at days 30 and 150
+    
+  * Calculate % of C-CO2e released that was contributed by C-CO2 vs C-CH4 at days 30, 150, 365
+
+  * Calculate C-CO2:C-CH4 and C-CO2:(C-CH4 as C-CO2e) at days 30, 150, 365
+
+```{r}
+# start by creating 4 dfs (ANA CO2, ANA CH4, AER CO2, AER CH4), join them into 2 dfs (ANA and AER) so as to have separate columns for C-CO2 and C-CH4, then combine them into a single df (tot_resp_co2e) that represents C-CO2e data from three time points during the incubations
+
+# create 4 dfs: ANA CO2, ANA CH4, AER CO2, and AER CH4; each df contains three sets of date ranges, each of which is made up of three time points at the beginning, middle, and end of the incubations - i.e. 3 time points at ~30 days, 3 time points at ~150 days, 3 time points at ~365 days
+# to convert from ugC-CH4 to ugC-CO2e: [ ugC-CO2e = ugC-CH4 * (16.04 gCH4 / 12.01 gC-CH4 ) * 28 (GWP of CH4) * (12.01 gC-CO2e / 44.01 gCO2e) ] (fyi - 1g / 10^6ug falls out of the calculation)
+
+# ----- ANA CO2 -----
+tot_resp_ana_co2 <- inc_df2 %>%
+  filter(headspace_treatment == "anaerobic", gas_sampled == "CO2", timepoint %in% c(8:10, 24:26, 35:37)) %>%
+  select(core_ID:timepoint, total_resp_ugC_CO2 = total_gas_resp_ugC, total_resp_ugC_CO2_g = total_gas_resp_ugC_g, total_resp_ugC_CO2_gC = total_gas_resp_ugC_gC)
+
+# ----- ANA CH4 -----
+tot_resp_ana_ch4 <- inc_df2 %>%
+  filter(headspace_treatment == "anaerobic", gas_sampled == "CH4", timepoint %in% c(8:10, 24:26, 35:37)) %>%
+  select(core_ID:timepoint, total_resp_ugC_CH4 = total_gas_resp_ugC, total_resp_ugC_CH4_g = total_gas_resp_ugC_g, total_resp_ugC_CH4_gC = total_gas_resp_ugC_gC) %>%
+  mutate(total_resp_ugC_CH4_as_CO2e = total_resp_ugC_CH4 * (16.04 / 44.01) * 28,
+         total_resp_ugC_CH4_g_as_CO2e = total_resp_ugC_CH4_g * (16.04 / 44.01) * 28,
+         total_resp_ugC_CH4_gC_as_CO2e = total_resp_ugC_CH4_gC * (16.04 / 44.01) * 28)
+
+# ----- AER CO2 -----
+tot_resp_aer_co2 <- inc_df2 %>%
+  filter(headspace_treatment == "aerobic", gas_sampled == "CO2", timepoint %in% c(8:10, 23:25, 32:34)) %>%
+  select(core_ID:timepoint, total_resp_ugC_CO2 = total_gas_resp_ugC, total_resp_ugC_CO2_g = total_gas_resp_ugC_g, total_resp_ugC_CO2_gC = total_gas_resp_ugC_gC)
+
+# ----- AER CH4 -----
+tot_resp_aer_ch4 <- inc_df2 %>%
+  filter(headspace_treatment == "aerobic", gas_sampled == "CH4", timepoint %in% c(8:10, 23:25, 32:34)) %>%
+  select(core_ID:timepoint, total_resp_ugC_CH4 = total_gas_resp_ugC, total_resp_ugC_CH4_g = total_gas_resp_ugC_g, total_resp_ugC_CH4_gC = total_gas_resp_ugC_gC) %>%
+  mutate(total_resp_ugC_CH4_as_CO2e = total_resp_ugC_CH4 * (16.04 / 44.01) * 28,
+         total_resp_ugC_CH4_g_as_CO2e = total_resp_ugC_CH4_g * (16.04 / 44.01) * 28,
+         total_resp_ugC_CH4_gC_as_CO2e = total_resp_ugC_CH4_gC * (16.04 / 44.01) * 28)
+
+
+# combine ANA CO2 and CH4 dfs, and AER CO2 and CH4 dfs
+tot_resp_ana_co2e <- left_join(tot_resp_ana_co2, tot_resp_ana_ch4) 
+tot_resp_aer_co2e <- left_join(tot_resp_aer_co2, tot_resp_aer_ch4) 
+
+# combine ANA and AER dfs into a single df that represents C-CO2e data from three time points during the incubations (~30 days, ~150 days, ~365 days)
+# add total C respiration columns [C-CO2 + C-CH4]
+# add total C-CO2e respiration columns [C-CO2 + C-CH4 (as CO2e)] - ugC-CO2e, ugC-CO2e/g, ugC-CO2e/gC 
+tot_resp_co2e <- full_join(tot_resp_ana_co2e, tot_resp_aer_co2e) %>%
+  mutate(total_C_resp_ugC = total_resp_ugC_CO2 + total_resp_ugC_CH4,
+         total_C_resp_ugC_g = total_resp_ugC_CO2_g + total_resp_ugC_CH4_g,
+         total_C_resp_ugC_gC = total_resp_ugC_CO2_gC + total_resp_ugC_CH4_gC,
+         total_resp_ugC_CO2e = total_resp_ugC_CO2 + total_resp_ugC_CH4_as_CO2e,
+         total_resp_ugC_CO2e_g = total_resp_ugC_CO2_g + total_resp_ugC_CH4_g_as_CO2e,
+         total_resp_ugC_CO2e_gC = total_resp_ugC_CO2_gC + total_resp_ugC_CH4_gC_as_CO2e) %>%
+  arrange(desc(headspace_treatment), depth_ID, temp_treatment_C, samp_int_date)
+
+# create a df that calculates averages and standard errors for C-CO2, C-CH4, C-CH4 as C-CO2e, and total C-CO2e (C-CO2 + C-CH4 as C-CO2e) - these will be reported as normalized by g sed and gC
+# df contains three sets of dates, each of which is made up of three timepoints at the beginning, middle, and end of the incubations (3 timepoints at ~30 days, 3 timepoints at ~150 days, 3 timepoints at ~365 days)
+# an average was taken of each set of replicates (1-3, 4-6, 7-9) across the sets of timepoints - e.g. 9 data points were averaged for depth 1 at 4C and ~30 days (reps 1-3 x 3 timepoints); 9 data points were averaged for depth 1 at 10C and ~150 days (reps 4-6 x 3 timepoints), etc.
+
+# sequence generates a sequence of values: seq(from, to, by)
+# cut() divides a range of x (in this case a column) into intervals and then groups data into its specified interval; the intervals use open and closed brackets -- i.e. "(" is an open interval - this means it does not include the endpoint, e.g. (0,1) describes an interval greater than 0 and less than 1; "[" is a closed interval - this means that it includes the endpoint, e.g. [0,1] describes an interval greater than or equal to 0 and less than or equal to 1; both can be used on a set, e.g. [1,5) describes an interval that includes 1 but excludes 5.
+avg_tot_resp_co2e <- tot_resp_co2e %>%
+  mutate(replicate = as.numeric(replicate), timepoint = as.numeric(timepoint)) %>%
+  group_by(headspace_treatment, depth_ID, replicate = cut(replicate, breaks = seq(0, 9, by = 3), labels = c("1-3", "4-6", "7-9")), timepoint = cut(timepoint, breaks = seq(0, 45, by = 15))) %>%
+            
+            #C-CO2/g sed and C-CO2/gC
+  summarise(avg_total_resp_ugC_CO2_g = mean(total_resp_ugC_CO2_g), 
+            se_total_resp_ugC_CO2_g = (sd(total_resp_ugC_CO2_g) / 9),
+            avg_total_resp_ugC_CO2_gC = mean(total_resp_ugC_CO2_gC), 
+            se_total_resp_ugC_CO2_gC = (sd(total_resp_ugC_CO2_gC) / 9), 
+            
+            #C-CH4/g sed and C-CH4/gC
+            avg_total_resp_ugC_CH4_g = mean(total_resp_ugC_CH4_g),
+            se_total_resp_ugC_CH4_g = (sd(total_resp_ugC_CH4_g) / 9),
+            avg_total_resp_ugC_CH4_gC = mean(total_resp_ugC_CH4_gC),
+            se_total_resp_ugC_CH4_gC = (sd(total_resp_ugC_CH4_gC) / 9),
+            
+            #C-CH4 as C-CO2e/g sed and C-CH4 as C-CO2e/gC
+            avg_total_resp_ugC_CH4_g_as_CO2e = mean(total_resp_ugC_CH4_g_as_CO2e),
+            se_total_resp_ugC_CH4_g_as_CO2e = (sd(total_resp_ugC_CH4_g_as_CO2e) / 9),
+            avg_total_resp_ugC_CH4_gC_as_CO2e = mean(total_resp_ugC_CH4_gC_as_CO2e),
+            se_total_resp_ugC_CH4_gC_as_CO2e = (sd(total_resp_ugC_CH4_gC_as_CO2e) / 9),
+            
+            #total C respired as totC/g sed and totC/gC
+            avg_total_C_resp_ugC_g = mean(total_C_resp_ugC_g),
+            se_total_C_resp_ugC_g = (sd(total_C_resp_ugC_g) / 9),
+            avg_total_C_resp_ugC_gC = mean(total_C_resp_ugC_gC),
+            se_total_C_resp_ugC_gC = (sd(total_C_resp_ugC_gC) / 9),
+            
+            #total C-CO2e/g sed and total C-CO2e/gC
+            avg_total_resp_ugC_CO2e_g = mean(total_resp_ugC_CO2e_g),
+            se_total_resp_ugC_CO2e_g = (sd(total_resp_ugC_CO2e_g) / 9),
+            avg_total_resp_ugC_CO2e_gC = mean(total_resp_ugC_CO2e_gC),
+            se_total_resp_ugC_CO2e_gC = (sd(total_resp_ugC_CO2e_gC) / 9))
+
+# relabel the variables in the time point column to fit ANA and AER time points
+avg_tot_resp_ana <- avg_tot_resp_co2e %>%
+  filter(headspace_treatment == "anaerobic") %>%
+  mutate(timepoint = ifelse(timepoint == "(0,15]", "8-10", ifelse(timepoint == "(15,30]", "24-26", "35-37")))
+
+avg_tot_resp_aer <- avg_tot_resp_co2e %>%
+  filter(headspace_treatment == "aerobic") %>%
+  mutate(timepoint = ifelse(timepoint == "(0,15]", "8-10", ifelse(timepoint == "(15,30]", "23-25", "32-34")))
+
+avg_tot_resp_co2e <- full_join(avg_tot_resp_aer, avg_tot_resp_ana)
+
+# add temp_treatment_C column back in 
+avg_tot_resp_co2e <- avg_tot_resp_co2e %>% 
+  add_column(temp_treatment_C = "NA", .after = "replicate") %>%
+  mutate(temp_treatment_C = ifelse(replicate == "1-3", 4, ifelse(replicate == "4-6", 10, 20)))
+
+# calculate % of total C respired by days 30 and 150 of the incubations
+# calculate % of CO2e released that was contributed by CO2 vs CH4 at days 30, 150, 365
+# calculate C-CO2:C-CH4 and C-CO2:(C-CH4 as C-CO2e) at days 30, 150, 365
+# note that these calculation use the averages across the three timepoints at the beginning of the incubations (~30 days), the middle (~150 days), and the end (~365 days)
+avg_tot_resp_co2e <- avg_tot_resp_co2e %>%
+  mutate(perc_total_C_resp = NA,
+         perc_CO2_of_CO2e = (avg_total_resp_ugC_CO2_gC / avg_total_resp_ugC_CO2e_gC) * 100,
+         perc_CH4_as_CO2e_of_CO2e = (avg_total_resp_ugC_CH4_gC_as_CO2e / avg_total_resp_ugC_CO2e_gC) * 100,
+         C_CO2_to_C_CH4 = avg_total_resp_ugC_CO2_gC / avg_total_resp_ugC_CH4_gC,
+         C_CO2_to_C_CH4_as_CO2e = avg_total_resp_ugC_CO2_gC / avg_total_resp_ugC_CH4_gC_as_CO2e)
+
+for (i in 1:length(avg_tot_resp_co2e$timepoint)){
+  if (avg_tot_resp_co2e$timepoint[i] == "32-34" | avg_tot_resp_co2e$timepoint[i] == "35-37"){
+    avg_tot_resp_co2e$perc_total_C_resp[i] <- 100}
+  
+  else if (avg_tot_resp_co2e$timepoint[i] == "8-10"){
+    avg_tot_resp_co2e$perc_total_C_resp[i] <- (avg_tot_resp_co2e$avg_total_C_resp_ugC_gC[i] / avg_tot_resp_co2e$avg_total_C_resp_ugC_gC[i+2]) * 100}
+  
+  else {
+    avg_tot_resp_co2e$perc_total_C_resp[i] <- (avg_tot_resp_co2e$avg_total_C_resp_ugC_gC[i] / avg_tot_resp_co2e$avg_total_C_resp_ugC_gC[i+1]) * 100
+  }
+}
+
+# Filter avg_tot_resp_co2e to include only the last three timepoints - this represents averages across the final three timepoints for each set of replicates (n = 9)
+# This df will be used to create plots in Excel with C-CO2, C-CH4, and C-CO2e, as total respiration and also as total respiration normalized by gC
+avg_tot_resp_co2e_day365 <- avg_tot_resp_co2e %>%
+  filter(timepoint == "32-34" | timepoint == "35-37")
+
+```
+
+
+##### 14. Plots of cumulative C-CO2e respired by day ~365 of incubations
+
+* Plots show total C respired as CO2e in aerobic vs anaerobic incubations, normalized by g SOC and g dry sediment
+* These plots use averages and standard errors for the final three time points from avg_tot_resp_co2e
+
+```{r}
+# Plot cumulative C-CO2e / g SOC at final three time points (~365 days)
+plt_avg_tot_resp_co2e_gC <- avg_tot_resp_co2e %>%
+  # filter(depth_ID == "01" | depth_ID == "05" | depth_ID == "07" | depth_ID == "11" | depth_ID == "12") %>%
+  filter(timepoint == "32-34" | timepoint == "35-37") %>%
+  ggplot(aes(y = avg_total_resp_ugC_CO2e_gC, x = depth_ID,
+             color = factor(temp_treatment_C))) +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_total_resp_ugC_CO2e_gC - se_total_resp_ugC_CO2e_gC, 
+                    ymax = avg_total_resp_ugC_CO2e_gC + se_total_resp_ugC_CO2e_gC), width = 0.2) +
+  labs(title = "Cumulative C-CO2e respired", 
+       subtitle = "Average of final three time points, normalized by g SOC",
+       y = "Cumulative C-CO2e Respired (ugC-CO2e/g SOC)", x = "Depth ID", 
+       color = "Temperature Treatment (C)") +
+  scale_color_manual(values = col_pal, limits = c("4",
+                                                    "10",
+                                                    "20")) +
+  facet_wrap(vars(headspace_treatment))
+print(plt_avg_tot_resp_co2e_gC)
+
+# Plot cumulative C-CO2e / g sed at final three time points (~365 days)
+plt_avg_tot_resp_co2e_gsed <- avg_tot_resp_co2e %>%
+  # filter(depth_ID == "01" | depth_ID == "05" | depth_ID == "07" | depth_ID == "11" | depth_ID == "12") %>%
+  filter(timepoint == "32-34" | timepoint == "35-37") %>%
+  ggplot(aes(y = avg_total_resp_ugC_CO2e_g, x = depth_ID,
+             color = factor(temp_treatment_C))) +
+  geom_point() +
+  geom_errorbar(aes(ymin = avg_total_resp_ugC_CO2e_g - se_total_resp_ugC_CO2e_g, 
+                    ymax = avg_total_resp_ugC_CO2e_g + se_total_resp_ugC_CO2e_g), width = 0.2) +
+  labs(title = "Cumulative C-CO2e respired", 
+       subtitle = "Average of final three time points, normalized by g sediment",
+       y = "Cumulative C-CO2e Respired (ugC-CO2e/g sed)", x = "Depth ID", 
+       color = "Temperature Treatment (C)") +
+  scale_color_manual(values = col_pal, limits = c("4",
+                                                    "10",
+                                                    "20")) +
+  facet_wrap(vars(headspace_treatment))
+print(plt_avg_tot_resp_co2e_gsed)
+
+```
+
+
+##### 15. Determine temperature sensitivity for incubations
+
+* Temperature sensitivity will be calculated in two ways:
+  
+  * Q10 values
+    a) Q10 values describe the factor by which the rate of a reaction changes, given a 10°C increase in temperature (e.g. if Q10 = 2, for every 10C temp increase, the reaction rate doubles)
+    b) A reaction rate can be described by: 
+       R_T = R_0 * e^(kt) 
+       And the Q_10 value is the reaction rate under an increase of 10°C: 
+       Q_10 = (R_T+10) / (R_T) ; Q_10 = (R_0 \* e^(k\*t+10)) / (R_0 \* e^(k\*t))= e^10k
+    c) On a graph of respiration vs temperature, Q_10 would therefore be the slope. However, because many of these graphs are exponential, the y-axis is often log-transformed: 
+       slope = ln((R_T+10) / (R_T)) = ln(y-axis) / x-axis
+    d) to find Q_10 when a y-axis has been log-transformed, multiply the slope of the regression line by 10, and raise this result to e: Q_10 = e^((ln(slope))*10) -- this brings us to the final Q_10 value = (R_T+10) / (R_T)
+    e) NOTES: 
+      i) For this specific experiment, Q10 values will be calculated using cumulative respiration rather than respiration rates to account for lag times associated with CH4 production; this means that the resulting Q10 values will represent the factor by which the quantity of gas released changes, given a 10°C increase in temperature
+      ii) Values were not averaged across or within replicates to find Q10 values. Instead, all replicate data was plotted for each timepoint. To get a clearer idea of the temperature response at the beginning, middle, and end of the incubations, three timepoints were used around days ~30, ~150, and ~365 - e.g. n = 9 for ANA replicates 1-3 at ~30 days:
+        ANA CO2 & CH4
+        30 days:  26(T8), 28(T9), 33(T10)
+        150 days: 134(T24), 139(T25), 154(T26)
+        365 days: 323(T35), 350(T36), 365(T37)
+        AER CO2 & CH4
+        30 days:  27(T8), 29(T9), 33(T10)
+        150 days: 126(T23), 132(T24), 160(T25)
+        365 days: 315(T32), 350(T33), 365(T34)
+      iii) Cumulative respiration of C-CH4 was negative (consumption of CH4) or zero (no production) early on during the incubations; because the y-axes on the graphs (cumulative respiration vs temperature) were log-transformed and cannot account for negative or zero values, this means that these data points were dropped from the calculations - it therefore may be most accurate to calculate Q10 values from the summed C-CO2e equations / graphs
+    
+  * Temperature sensitivity ratios
+    a) Ratios provide a comparison of total cumulative respiration between different temperatures at specific points in time, rather than by rate of cumulative respiration. In other studies, ratios have been used in place of Q10 equations for sediment incubations to account for lag phases in CH4 production, which are not well represented when looking at production rates
+    b) Temp sensitivity will be measured as total C respiration (C‐CO2 + C‐CH4 normalized by gC) between pairs of incubation temperatures, e.g. (C-CO2e / gC [at day 30, 10C]) / (C-CO2e / gC [at day 30, 4C])
+    c) Temperature sensitivity ratios calculated for: 20C:10C, 20C:4C, and 10C:4C
+
+```{r}
+
+# --- Q10 values ---
+# Determine total net C respiration as C-CO2, C-CH4, and C-CO2e
+# write a function that creates graphs of cumulative respiration (log scale) vs temperature for each time frame (30 days, 150 days, 365 days) and gas (C-CO2, C-CH4, C-CO2e)
+# use a linear model to create a slope for each of these sets of data
+# extract summary statistics for each linear model
+# use summary statistics to derive Q10 values 
+
+# write function that creates a filtered df in the global env; use this to make tables of summary stats for linear models (can also call it within the plt_Q10 value function)
+filtered_df <- function(df, headspace, tp, depth){
+  fil_df <- df %>%
+    filter(headspace_treatment == headspace, timepoint %in% tp, depth_ID %in% depth)
+  return(fil_df)
+}
+
+# write a function that creates Q10 temperature sensitivity graphs
+
+# function notes:
+# function takes arguments for df, headspace treatment ("aerobic" or "anaerobic"), timepoint (will use this for a series of time points, e.g. c(8:10)), depth (will use this for a series of time points, e.g. c("01", "05", "07"))
+# tried to include linear model summaries within the plt_Q10 function so that it would create a plot and also produce summary statistics for the plot. However, using nest_by and the following code (mutate(), summarize()) requires column names, and doesn't accept function objects that point to column names (e.g. when pltQ10(y_data_col = "total_resp_ugC_CO2e_gC") it will not substitute in "total_resp_ugC_CO2e_gC" - tried to use {{brackets}} to get around this, but mutate() led to an "invalid model formula error", saying that it cannot accept lists)
+# From https://dplyr.tidyverse.org/reference/dplyr_data_masking.html : "The main challenge of data masking arises when you introduce some indirection, i.e. instead of directly typing the name of a variable you want to supply it in a function argument or character vector...If you want the user to supply the variable (or function of variables) in a function argument, embrace the argument, e.g. filter(df, {{ var }})"
+# thus, instead of including this code in plt_Q10 function, linear model output data will be calculated for each time frame of interest outside of the plt_Q10 function
+# The underlying function that produces the stat_regline_equation is .stat_lm, from the ggpubr package, and it produces 2 significant figures. This is hard-coded into the function itself - you can see this by running debugonce(ggpubr:::.stat_lm) before printing a plot. To increase the number of sigfigs displayed on the plot, you can enter trace(ggpubr:::.stat_lm, edit = TRUE) into the console to modify the function's code in the pop-up window. The lines to change for r^2 are 9-10, and for the equation of the line are 13-14. [https://stackoverflow.com/questions/66177005/im-using-stat-regline-equation-with-ggscatter-is-there-a-way-to-specify-the-si]
+# to call plt_Q10 with the specified scale_color_manual(), need to supply the filtered_df fx with depths "01", "05", "07", "11", "12" (i.e. where all three temperature treatments occurred)
+# substitute() picks up the name of the column, deparse() turns it into a character string
+
+plt_Q10 <- function(df, headspace, tp, depth, y_data_col, x_data_col){
+  data2plt <- filtered_df(df, headspace, tp, depth)
+  plt <- ggplot(data2plt, aes(y = log({{y_data_col}}), 
+                              x = {{x_data_col}},
+                              color = factor(sample_depth_range_m))) +
+    geom_point() +
+    geom_smooth(method="lm") +
+    labs(title = paste("Temperature sensitivity for ", headspace, " incubations", sep = ""),
+         subtitle = paste("Timepoints ", sub(")", "", substring(deparse(substitute(tp)), 3)), sep = ""),
+         y = paste("Cumulative Respiration (ugC-",
+                   sub("_", "/", substring(deparse(substitute(y_data_col)), 16)), "), log scale", sep = ""),
+         x = "Temperature Treatment (C)", 
+         color = "Depth (m)") +
+    scale_color_manual(values = col_pal, limits = c("0.31-0.47",
+                                                    "5.24-5.39",
+                                                    "10.05-10.20",
+                                                    "18.52-18.67",
+                                                    "19.83-19.98")) +
+    stat_regline_equation(label.x = 4, 
+                          aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~~~")), 
+                          show.legend = FALSE)
+  return(plt)
+}
+
+# next, make Q10 temp sensitivity plots, and use a linear model to create a slope for each set of data; extract summary statistics for each linear model and then use summary statistics to calculate Q10 values 
+
+# linear model notes:
+# use nest_by() to produce a dataframe with one row per group (in this case, one row for each depth), this makes performing operations on the grouped data easier, especially with the broom functions
+# the broom package takes the output of built-in functions (e.g. lm, nls, t.test), and turns it into tidy tibbles / a tabular format
+# tidy: constructs a tibble that summarizes the model’s statistical findings. This includes coefficients and p-values for each term in a regression, per-cluster information in clustering applications, or per-test information for multitest functions
+# augment: add columns to the original data that was modeled. This includes predictions, residuals, and cluster assignments
+# glance: construct a concise one-row summary of the model. This typically contains values such as R^2, adjusted R^2, and residual standard error that are computed once for the entire model.
+# the lm function needs a formula (Y~X) and then a data source; to interpret lm summary statistics output, see: https://feliperego.github.io/blog/2015/10/23/Interpreting-Model-Output-In-R
+
+
+# ------- ANA Q10 temperature sensitivity plots + summary stats -------
+
+# ----- ANA C-CO2 -----
+
+# Time points 8-10
+# plot
+plt_ana_c_co2_temp_sens_8_10 <- (plt_Q10(df = tot_resp_co2e, headspace = "anaerobic", tp = c(8:10), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CO2_gC, x_data_col = temp_treatment_C))
+print(plt_ana_c_co2_temp_sens_8_10)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "anaerobic", tp = c(8:10), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_ana_c_co2_temp_sens_8_10 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CO2_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_ana_c_co2_temp_sens_8_10)
+
+lm_q10_ana_c_co2_temp_sens_8_10 <- lm_sum_ana_c_co2_temp_sens_8_10 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "anaerobic", 
+       timepoint = "8-10", day = "30", gas_resp = "ugC_CO2_gC")
+# print(lm_q10_ana_c_co2_temp_sens_8_10)
+
+
+# Time points 24-26
+# plot
+plt_ana_c_co2_temp_sens_24_26 <- (plt_Q10(df = tot_resp_co2e, headspace = "anaerobic", tp = c(24:26), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CO2_gC, x_data_col = temp_treatment_C))
+print(plt_ana_c_co2_temp_sens_24_26)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "anaerobic", tp = c(24:26), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_ana_c_co2_temp_sens_24_26 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CO2_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_ana_c_co2_temp_sens_24_26)
+
+lm_q10_ana_c_co2_temp_sens_24_26 <- lm_sum_ana_c_co2_temp_sens_24_26 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "anaerobic",
+       timepoint = "24-26", day = "150", gas_resp = "ugC_CO2_gC")
+# print(lm_q10_ana_c_co2_temp_sens_24_26)
+
+
+# Time points 35-37
+# plot
+plt_ana_c_co2_temp_sens_35_37 <- (plt_Q10(df = tot_resp_co2e, headspace = "anaerobic", tp = c(35:37), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CO2_gC, x_data_col = temp_treatment_C))
+print(plt_ana_c_co2_temp_sens_35_37)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "anaerobic", tp = c(35:37), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_ana_c_co2_temp_sens_35_37 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CO2_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_ana_c_co2_temp_sens_35_37)
+
+lm_q10_ana_c_co2_temp_sens_35_37 <- lm_sum_ana_c_co2_temp_sens_35_37 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "anaerobic",
+       timepoint = "35-37", day = "365", gas_resp = "ugC_CO2_gC")
+# print(lm_q10_ana_c_co2_temp_sens_35_37)
+
+# # check residuals
+# # fit regression model
+# lm_data1 <- filtered_df(df = tot_resp_co2e, headspace = "anaerobic", tp = c(35:37), depth = c("01", "05", "07", "11", "12")) 
+# mod_1 <- lm(log(total_resp_ugC_CO2_gC) ~ temp_treatment_C, data = lm_data1)
+# res <- resid(mod_1)
+# 
+# # produce residual vs fitted plot
+# plot(fitted(mod_1), res)
+# abline(0,0)
+# 
+# # produce Q-Q plot
+# qqnorm(res)
+# qqline(res)
+# 
+# # produce density plot
+# plot(density(res))
+
+# ----- ANA C-CH4 -----
+
+# Time points 8-10
+# plot
+plt_ana_c_ch4_temp_sens_8_10 <- (plt_Q10(df = tot_resp_co2e, headspace = "anaerobic", tp = c(8:10), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CH4_gC, x_data_col = temp_treatment_C))
+print(plt_ana_c_ch4_temp_sens_8_10)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "anaerobic", tp = c(8:10), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_ana_c_ch4_temp_sens_8_10 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CH4_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_ana_c_ch4_temp_sens_8_10)
+
+lm_q10_ana_c_ch4_temp_sens_8_10 <- lm_sum_ana_c_ch4_temp_sens_8_10 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "anaerobic", 
+       timepoint = "8-10", day = "30", gas_resp = "ugC_CH4_gC")
+# print(lm_q10_ana_c_ch4_temp_sens_8_10)
+
+
+# Time points 24-26
+# plot
+plt_ana_c_ch4_temp_sens_24_26 <- (plt_Q10(df = tot_resp_co2e, headspace = "anaerobic", tp = c(24:26), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CH4_gC, x_data_col = temp_treatment_C))
+print(plt_ana_c_ch4_temp_sens_24_26)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "anaerobic", tp = c(24:26), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_ana_c_ch4_temp_sens_24_26 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CH4_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_ana_c_ch4_temp_sens_24_26)
+
+lm_q10_ana_c_ch4_temp_sens_24_26 <- lm_sum_ana_c_ch4_temp_sens_24_26 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "anaerobic",
+       timepoint = "24-26", day = "150", gas_resp = "ugC_CH4_gC")
+# print(lm_q10_ana_c_ch4_temp_sens_24_26)
+
+# Time points 35-37
+# plot
+plt_ana_c_ch4_temp_sens_35_37 <- (plt_Q10(df = tot_resp_co2e, headspace = "anaerobic", tp = c(35:37), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CH4_gC, x_data_col = temp_treatment_C))
+print(plt_ana_c_ch4_temp_sens_35_37)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "anaerobic", tp = c(35:37), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_ana_c_ch4_temp_sens_35_37 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CH4_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_ana_c_ch4_temp_sens_35_37)
+
+lm_q10_ana_c_ch4_temp_sens_35_37 <- lm_sum_ana_c_ch4_temp_sens_35_37 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "anaerobic",
+       timepoint = "35-37", day = "365", gas_resp = "ugC_CH4_gC")
+# print(lm_q10_ana_c_ch4_temp_sens_35_37)
+
+# # check residuals
+# # fit regression model
+# lm_data1 <- filtered_df(df = tot_resp_co2e, headspace = "anaerobic", tp = c(35:37), depth = c("01", "05", "07", "11", "12"))  
+# mod_1 <- lm(log(total_resp_ugC_CH4_gC) ~ temp_treatment_C, data = lm_data1)
+# res <- resid(mod_1)
+# 
+# # produce residual vs fitted plot
+# plot(fitted(mod_1), res)
+# abline(0,0)
+# 
+# # produce Q-Q plot
+# qqnorm(res)
+# qqline(res)
+# 
+# # produce density plot
+# plot(density(res))
+
+# ----- ANA C-CO2e -----
+
+# Time points 8-10
+# plot
+plt_ana_c_co2e_temp_sens_8_10 <- (plt_Q10(df = tot_resp_co2e, headspace = "anaerobic", tp = c(8:10), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CO2e_gC, x_data_col = temp_treatment_C))
+print(plt_ana_c_co2e_temp_sens_8_10)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "anaerobic", tp = c(8:10), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_ana_c_co2e_temp_sens_8_10 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CO2e_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_ana_c_co2e_temp_sens_8_10)
+
+lm_q10_ana_c_co2e_temp_sens_8_10 <- lm_sum_ana_c_co2e_temp_sens_8_10 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "anaerobic", 
+       timepoint = "8-10", day = "30", gas_resp = "ugC_CO2e_gC")
+# print(lm_q10_ana_c_co2e_temp_sens_8_10)
+
+
+# Time points 24-26
+# plot
+plt_ana_c_co2e_temp_sens_24_26 <- (plt_Q10(df = tot_resp_co2e, headspace = "anaerobic", tp = c(24:26), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CO2e_gC, x_data_col = temp_treatment_C))
+print(plt_ana_c_co2e_temp_sens_24_26)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "anaerobic", tp = c(24:26), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_ana_c_co2e_temp_sens_24_26 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CO2e_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_ana_c_co2e_temp_sens_24_26)
+
+lm_q10_ana_c_co2e_temp_sens_24_26 <- lm_sum_ana_c_co2e_temp_sens_24_26 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "anaerobic", 
+       timepoint = "24-26", day = "150", gas_resp = "ugC_CO2e_gC")
+# print(lm_q10_ana_c_co2e_temp_sens_24_26)
+
+
+# Time points 35-37
+# plot
+plt_ana_c_co2e_temp_sens_35_37 <- (plt_Q10(df = tot_resp_co2e, headspace = "anaerobic", tp = c(35:37), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CO2e_gC, x_data_col = temp_treatment_C))
+print(plt_ana_c_co2e_temp_sens_35_37)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "anaerobic", tp = c(35:37), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_ana_c_co2e_temp_sens_35_37 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CO2e_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_ana_c_co2e_temp_sens_35_37)
+
+lm_q10_ana_c_co2e_temp_sens_35_37 <- lm_sum_ana_c_co2e_temp_sens_35_37 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "anaerobic", 
+       timepoint = "35-37", day = "365", gas_resp = "ugC_CO2e_gC")
+# print(lm_q10_ana_c_co2e_temp_sens_35_37)
+
+# check residuals
+# # fit regression model
+# lm_data1 <- filtered_df(df = tot_resp_co2e, headspace = "anaerobic", tp = c(35:37), depth = c("01", "05", "07", "11", "12"))  
+# mod_1 <- lm(log(total_resp_ugC_CO2e_gC) ~ temp_treatment_C, data = lm_data1)
+# res <- resid(mod_1)
+# 
+# # produce residual vs fitted plot
+# plot(fitted(mod_1), res)
+# abline(0,0)
+# 
+# # produce Q-Q plot
+# qqnorm(res)
+# qqline(res)
+# 
+# # produce density plot
+# plot(density(res))
+
+# ------- AER Q10 temperature sensitivity plots + summary stats -------
+
+# ----- AER C-CO2 -----
+
+# Time points 8-10
+# plot
+plt_aer_c_co2_temp_sens_8_10 <- (plt_Q10(df = tot_resp_co2e, headspace = "aerobic", tp = c(8:10), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CO2_gC, x_data_col = temp_treatment_C))
+print(plt_aer_c_co2_temp_sens_8_10)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "aerobic", tp = c(8:10), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_aer_c_co2_temp_sens_8_10 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CO2_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_aer_c_co2_temp_sens_8_10)
+
+lm_q10_aer_c_co2_temp_sens_8_10 <- lm_sum_aer_c_co2_temp_sens_8_10 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "aerobic", 
+       timepoint = "8-10", day = "30", gas_resp = "ugC_CO2_gC")
+# print(lm_q10_aer_c_co2_temp_sens_8_10)
+
+
+# Time points 23-25
+# plot
+plt_aer_c_co2_temp_sens_23_25 <- (plt_Q10(df = tot_resp_co2e, headspace = "aerobic", tp = c(23:25), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CO2_gC, x_data_col = temp_treatment_C))
+print(plt_aer_c_co2_temp_sens_23_25)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "aerobic", tp = c(23:25), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_aer_c_co2_temp_sens_23_25 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CO2_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_aer_c_co2_temp_sens_23_25)
+
+lm_q10_aer_c_co2_temp_sens_23_25 <- lm_sum_aer_c_co2_temp_sens_23_25 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "aerobic", 
+       timepoint = "23-25", day = "150", gas_resp = "ugC_CO2_gC")
+# print(lm_q10_aer_c_co2_temp_sens_23_25)
+
+# Time points 32-34
+# plot
+plt_aer_c_co2_temp_sens_32_34 <- (plt_Q10(df = tot_resp_co2e, headspace = "aerobic", tp = c(32:34), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CO2_gC, x_data_col = temp_treatment_C))
+print(plt_aer_c_co2_temp_sens_32_34)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "aerobic", tp = c(32:34), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_aer_c_co2_temp_sens_32_34 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CO2_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_aer_c_co2_temp_sens_32_34)
+
+lm_q10_aer_c_co2_temp_sens_32_34 <- lm_sum_aer_c_co2_temp_sens_32_34 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "aerobic", 
+       timepoint = "32-34", day = "365", gas_resp = "ugC_CO2_gC")
+# print(lm_q10_aer_c_co2_temp_sens_32_34)
+
+# ----- AER C-CH4 -----
+
+# Time points 8-10
+# plot
+plt_aer_c_ch4_temp_sens_8_10 <- (plt_Q10(df = tot_resp_co2e, headspace = "aerobic", tp = c(8:10), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CH4_gC, x_data_col = temp_treatment_C))
+print(plt_aer_c_ch4_temp_sens_8_10)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "aerobic", tp = c(8:10), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_aer_c_ch4_temp_sens_8_10 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CH4_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_aer_c_ch4_temp_sens_8_10)
+
+lm_q10_aer_c_ch4_temp_sens_8_10 <- lm_sum_aer_c_ch4_temp_sens_8_10 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "aerobic", 
+       timepoint = "8-10", day = "30", gas_resp = "ugC_CH4_gC")
+# print(lm_q10_aer_c_ch4_temp_sens_8_10)
+
+
+# Time points 23-25
+# plot
+plt_aer_c_ch4_temp_sens_23_25 <- (plt_Q10(df = tot_resp_co2e, headspace = "aerobic", tp = c(23:25), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CH4_gC, x_data_col = temp_treatment_C))
+print(plt_aer_c_ch4_temp_sens_23_25)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "aerobic", tp = c(23:25), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_aer_c_ch4_temp_sens_23_25 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CH4_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model))
+# print(lm_sum_aer_c_ch4_temp_sens_23_25)
+
+lm_q10_aer_c_ch4_temp_sens_23_25 <- lm_sum_aer_c_ch4_temp_sens_23_25 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "aerobic", 
+       timepoint = "23-25", day = "150", gas_resp = "ugC_CH4_gC")
+# print(lm_q10_aer_c_ch4_temp_sens_23_25)
+
+
+# Time points 32-34
+# plot
+plt_aer_c_ch4_temp_sens_32_34 <- (plt_Q10(df = tot_resp_co2e, headspace = "aerobic", tp = c(32:34), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CH4_gC, x_data_col = temp_treatment_C))
+print(plt_aer_c_ch4_temp_sens_32_34)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "aerobic", tp = c(32:34), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_aer_c_ch4_temp_sens_32_34 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CH4_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_aer_c_ch4_temp_sens_32_34)
+
+lm_q10_aer_c_ch4_temp_sens_32_34 <- lm_sum_aer_c_ch4_temp_sens_32_34 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "aerobic", 
+       timepoint = "32-34", day = "365", gas_resp = "ugC_CH4_gC")
+# print(lm_q10_aer_c_ch4_temp_sens_32_34)
+
+# ----- AER C-CO2e -----
+
+# Time points 8-10
+# plot
+plt_aer_c_co2e_temp_sens_8_10 <- (plt_Q10(df = tot_resp_co2e, headspace = "aerobic", tp = c(8:10), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CO2e_gC, x_data_col = temp_treatment_C))
+print(plt_aer_c_co2e_temp_sens_8_10)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "aerobic", tp = c(8:10), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_aer_c_co2e_temp_sens_8_10 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CO2e_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_aer_c_co2e_temp_sens_8_10)
+
+lm_q10_aer_c_co2e_temp_sens_8_10 <- lm_sum_aer_c_co2e_temp_sens_8_10 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "aerobic", 
+       timepoint = "8-10", day = "30", gas_resp = "ugC_CO2e_gC")
+# print(lm_q10_aer_c_co2e_temp_sens_8_10)
+
+# Time points 23-25
+# plot
+plt_aer_c_co2e_temp_sens_23_25 <- (plt_Q10(df = tot_resp_co2e, headspace = "aerobic", tp = c(23:25), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CO2e_gC, x_data_col = temp_treatment_C))
+print(plt_aer_c_co2e_temp_sens_23_25)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "aerobic", tp = c(23:25), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_aer_c_co2e_temp_sens_23_25 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CO2e_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_aer_c_co2e_temp_sens_23_25)
+
+lm_q10_aer_c_co2e_temp_sens_23_25 <- lm_sum_aer_c_co2e_temp_sens_23_25 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "aerobic", 
+       timepoint = "23-25", day = "150", gas_resp = "ugC_CO2e_gC")
+# print(lm_q10_aer_c_co2e_temp_sens_23_25)
+
+# Time points 32-34
+# plot
+plt_aer_c_co2e_temp_sens_32_34 <- (plt_Q10(df = tot_resp_co2e, headspace = "aerobic", tp = c(32:34), depth = c("01", "05", "07", "11", "12"), y_data_col = total_resp_ugC_CO2e_gC, x_data_col = temp_treatment_C))
+print(plt_aer_c_co2e_temp_sens_32_34)
+
+# create summary stats - summarized df, q10 df
+lm_data <- filtered_df(df = tot_resp_co2e, headspace = "aerobic", tp = c(32:34), depth = c("01", "05", "07", "11", "12")) 
+lm_sum_aer_c_co2e_temp_sens_32_34 <- lm_data %>% 
+  nest_by(depth_ID) %>%
+  mutate(model = list(lm(log(total_resp_ugC_CO2e_gC) ~ temp_treatment_C, data = data))) %>%
+  summarize(tidy(model), glance(model)) 
+# print(lm_sum_aer_c_co2e_temp_sens_32_34)
+
+lm_q10_aer_c_co2e_temp_sens_32_34 <- lm_sum_aer_c_co2e_temp_sens_32_34 %>%
+  filter(term == "temp_treatment_C") %>%
+  select(depth_ID, estimate, std.error, p.value) %>%
+  mutate(Q10 = exp(estimate * 10), headspace_treatment = "aerobic", 
+       timepoint = "32-34", day = "365", gas_resp = "ugC_CO2e_gC")
+# print(lm_q10_aer_c_co2e_temp_sens_32_34)
+
+# # check residuals
+# # fit regression model
+# lm_data1 <- filtered_df(df = tot_resp_co2e, headspace = "aerobic", tp = c(32:34), depth = c("01", "05", "07", "11", "12"))  
+# mod_1 <- lm(log(total_resp_ugC_CO2e_gC) ~ temp_treatment_C, data = lm_data1)
+# res <- resid(mod_1)
+# 
+# # produce residual vs fitted plot
+# plot(fitted(mod_1), res)
+# abline(0,0)
+# 
+# # produce Q-Q plot
+# qqnorm(res)
+# qqline(res)
+# 
+# # produce density plot
+# plot(density(res))
+
+
+# create one large df with all Q10 summary statistics
+q10_df <- full_join(lm_q10_ana_c_co2_temp_sens_8_10, lm_q10_ana_c_co2_temp_sens_24_26) %>%
+  full_join(lm_q10_ana_c_co2_temp_sens_35_37) %>%
+  full_join(lm_q10_ana_c_ch4_temp_sens_8_10) %>%
+  full_join(lm_q10_ana_c_ch4_temp_sens_24_26) %>%
+  full_join(lm_q10_ana_c_ch4_temp_sens_35_37) %>%
+  full_join(lm_q10_ana_c_co2e_temp_sens_8_10) %>%
+  full_join(lm_q10_ana_c_co2e_temp_sens_24_26) %>%
+  full_join(lm_q10_ana_c_co2e_temp_sens_35_37) %>%
+  full_join(lm_q10_aer_c_co2_temp_sens_8_10) %>%
+  full_join(lm_q10_aer_c_co2_temp_sens_23_25) %>%
+  full_join(lm_q10_aer_c_co2_temp_sens_32_34) %>%
+  full_join(lm_q10_aer_c_ch4_temp_sens_8_10) %>%
+  full_join(lm_q10_aer_c_ch4_temp_sens_23_25) %>%
+  full_join(lm_q10_aer_c_ch4_temp_sens_32_34) %>%
+  full_join(lm_q10_aer_c_co2e_temp_sens_8_10) %>%
+  full_join(lm_q10_aer_c_co2e_temp_sens_23_25) %>%
+  full_join(lm_q10_aer_c_co2e_temp_sens_32_34) %>%
+  # rearrange columns, rename estimate column (slope of regression line from graphs)
+  select(headspace_treatment, gas_resp, depth_ID, day, timepoint, estimate, std.error, p.value, Q10) %>%
+  rename(regr_ln_slope = estimate, std_error = std.error, p_value = p.value) %>%
+  arrange(desc(headspace_treatment), gas_resp, depth_ID)
+
+# create a multivariate linear regression model for Q10 values to determine whether they are statistically affected by temperature or depth
+# q10_df2 shows linear model results by headspace treatment and gas respired -- tidied column shows the coefficients and p-values for each term in the regression; glanced column shows a summary of the overall model output
+q10_df2 <- q10_df %>%
+  mutate(depth_ID = as.numeric(depth_ID), day = as.numeric(day))
+
+q10_df2 <- q10_df2 %>%
+  nest(-headspace_treatment, -gas_resp) %>% 
+  mutate(
+    fit = map(data, ~ lm(Q10 ~ day + depth_ID, data = .x)),
+    tidied = map(fit, tidy),
+    glanced = map(fit, glance))
+
+q10_df2 %>% 
+  unnest(tidied) 
+q10_df2 %>%
+  unnest(glanced)
+
+
+# --- Temperature sensitivity ratios ---
+
+# create temperature sensitivity df for ratios of 20C:10C, 20C:4C, 10C:4C
+# determine temperature sensitivity for C-CO2, C-CH4, C-CO2e
+# which() gives the position of the elements (i.e., row number/column number/array index) in a logical vector which are TRUE
+# match() allows column data to be sorted in a specific order
+
+temp_sens_ratios <- avg_tot_resp_co2e %>%
+  group_by(headspace_treatment, depth_ID, timepoint) %>%
+  
+  # 20C:10C
+  summarize(ugC_CO2_gC_20c_10c = avg_total_resp_ugC_CO2_gC[which(temp_treatment_C == 20)] / avg_total_resp_ugC_CO2_gC[which(temp_treatment_C == 10)],
+            ugC_CH4_gC_20c_10c = avg_total_resp_ugC_CH4_gC[which(temp_treatment_C == 20)] / avg_total_resp_ugC_CH4_gC[which(temp_treatment_C == 10)],
+            ugC_CO2e_gC_20c_10c = avg_total_resp_ugC_CO2e_gC[which(temp_treatment_C == 20)] / avg_total_resp_ugC_CO2e_gC[which(temp_treatment_C == 10)],
+  
+  # 20C:4C        
+            ugC_CO2_gC_20c_4c = avg_total_resp_ugC_CO2_gC[which(temp_treatment_C == 20)] / avg_total_resp_ugC_CO2_gC[which(temp_treatment_C == 4)],
+            ugC_CH4_gC_20c_4c = avg_total_resp_ugC_CH4_gC[which(temp_treatment_C == 20)] / avg_total_resp_ugC_CH4_gC[which(temp_treatment_C == 4)],
+            ugC_CO2e_gC_20c_4c = avg_total_resp_ugC_CO2e_gC[which(temp_treatment_C == 20)] / avg_total_resp_ugC_CO2e_gC[which(temp_treatment_C == 4)],
+    
+  # 10C:4C
+            ugC_CO2_gC_10c_4c = avg_total_resp_ugC_CO2_gC[which(temp_treatment_C == 10)] / avg_total_resp_ugC_CO2_gC[which(temp_treatment_C == 4)],
+            ugC_CH4_gC_10c_4c = avg_total_resp_ugC_CH4_gC[which(temp_treatment_C == 10)] / avg_total_resp_ugC_CH4_gC[which(temp_treatment_C == 4)],
+            ugC_CO2e_gC_10c_4c = avg_total_resp_ugC_CO2e_gC[which(temp_treatment_C == 10)] / avg_total_resp_ugC_CO2e_gC[which(temp_treatment_C == 4)]) %>%
+  
+  arrange(headspace_treatment, depth_ID, match(timepoint, c("8-10", "23-25", "24-26", "32-34", "35-37")))
+
+```
+
+
+##### 16. Save dataframes as .csv files
+  * NOTE: 
+    * .csv files change the values in the replicate column to a date format; this also happens with values "8-10" in the timepoint column - need to be corrected if using in another program like Excel
+
+```{r}
+# [ TABLES ]
+# Update everything with the current date
+
+# write .csv output function to save dfs within local files
+# fx takes character strings for: folder path, date, file name
+save_csv <- function(df, folder_path, date_yr_mo_d, file_name){
+  write.csv(df, paste(as.character(folder_path), "/", as.character(date_yr_mo_d), "_", as.character(file_name), ".csv", sep = ""), row.names = FALSE)
+}
+
+# path to folder where tables will be stored
+table_folder_path <- "/Users/nancylf/Documents/UC Berkeley/Research/NGEE Arctic/NSF Goldstream Project/Incubations/Data Compilation/R Output_Summary Tables/2022"
+
+# table with 12 months of incubation data
+save_csv(inc_df2, table_folder_path, "2022-07-08", "Calculated_Production_and_Resp_Rates")
+
+# table with 12 months of data, averaged across replicates
+save_csv(summ_vals, table_folder_path, "2022-07-08", "Summarized_Resp_Replicate_Avgs")
+
+# table for cumulative respiration (C-CO2, C-CH4, C-CO2e), averaged across three time points at beginning, middle, and end of incubations
+save_csv(avg_tot_resp_co2e, table_folder_path, "2022-07-08", "Avg_Resp_3_Timepoints")
+
+# # table for cumulative respiration (C-CO2, C-CH4, C-CO2e), averaged across three time points at the end of incubations; use this for easier graphing in Excel
+# save_csv(avg_tot_resp_co2e_day365, table_folder_path, "2022-07-08", "Avg_Resp_3_Timepoints_Day365")
+
+# table for Q10 temperature sensitivity values
+save_csv(q10_df, table_folder_path, "2022-07-27", "Q10_Values_3_Timepoints")
+
+# table for temperature sensitivity ratios
+save_csv(temp_sens_ratios, table_folder_path, "2022-07-08", "Temp_Sens_Ratios_3_Timepoints")
+
+```
+
+##### 17. Save plots as .png files
+
+```{r}
+# [ PLOTS ]
+# Update everything with the current date
+
+# write .png output function to save plots within local files
+# fx takes character strings for: folder path, date, file name
+save_png <- function(plt_name, folder_path, date_yr_mo_d, file_name){
+  ggsave(plot = plt_name, paste(as.character(folder_path), "/", as.character(date_yr_mo_d), "_", as.character(file_name), ".png", sep = ""))
+}
+
+# path to folder where plots will be stored
+plt_folder_path <- "/Users/nancylf/Documents/UC Berkeley/Research/NGEE Arctic/NSF Goldstream Project/Incubations/Data Compilation/R Output_Graphs/2022"
+
+
+# --- ANA CO2 ---
+
+# Cumulative CO2, not normalized (C-CO2)
+save_png(plt_ana_co2, plt_folder_path, "2022-07-08", "Cumulative ANA CO2")
+
+# Cumulative CO2, normalized by g dry sediment (C-CO2/g)
+save_png(plt_ana_co2_g, plt_folder_path, "2022-07-08", "Cumulative ANA CO2_g dry sed")
+
+# Cumulative CO2, normalized by gC (C-CO2/gC)
+save_png(plt_ana_co2_gC, plt_folder_path, "2022-07-08", "Cumulative ANA CO2_gC")
+
+# Cumulative CO2 replicate averages, not normalized (C-CO2)
+save_png(plt_avg_ana_co2, plt_folder_path, "2022-07-08", "Cumulative ANA CO2 avgs")
+
+# Cumulative CO2 replicate averages, normalized by g dry sediment (C-CO2/g)
+save_png(plt_avg_ana_co2_g, plt_folder_path, "2022-07-08", "Cumulative ANA CO2 avgs_g dry sed")
+
+# Cumulative CO2 replicate averages, normalized by gC (C-CO2/gC)
+save_png(plt_avg_ana_co2_gC, plt_folder_path, "2022-07-08", "Cumulative ANA CO2 avgs_gC")
+
+# --- ANA CH4 ---
+
+# Cumulative CH4, not normalized (C-CH4)
+save_png(plt_ana_ch4, plt_folder_path, "2022-07-08", "Cumulative ANA CH4")
+
+# Cumulative CH4, normalized by g dry sediment (C-CH4/g)
+save_png(plt_ana_ch4_g, plt_folder_path, "2022-07-08", "Cumulative ANA CH4_g dry sed")
+
+# Cumulative CH4, normalized by gC (C-CH4/gC)
+save_png(plt_ana_ch4_gC, plt_folder_path, "2022-07-08", "Cumulative ANA CH4_gC")
+
+# Cumulative CH4 replicate averages, not normalized (C-CH4)
+save_png(plt_avg_ana_ch4, plt_folder_path, "2022-07-08", "Cumulative ANA CH4 avgs")
+
+# Cumulative CH4 replicate averages, normalized by g dry sediment (C-CH4/g)
+save_png(plt_avg_ana_ch4_g, plt_folder_path, "2022-07-08", "Cumulative ANA CH4 avgs_g dry sed")
+
+# Cumulative CH4 replicate averages, normalized by gC (C-CH4/gC)
+save_png(plt_avg_ana_ch4_gC, plt_folder_path, "2022-07-08", "Cumulative ANA CH4 avgs_gC")
+
+# --- AER CO2 ---
+
+# Cumulative CO2, not normalized (C-CO2)
+save_png(plt_aer_co2, plt_folder_path, "2022-07-08", "Cumulative AER CO2")
+
+# Cumulative CO2, normalized by g dry sediment (C-CO2/g)
+save_png(plt_aer_co2_g, plt_folder_path, "2022-07-08", "Cumulative AER CO2_g dry sed")
+
+# Cumulative CO2, normalized by gC (C-CO2/gC)
+save_png(plt_aer_co2_gC, plt_folder_path, "2022-07-08", "Cumulative AER CO2_gC")
+
+# Cumulative CO2 replicate averages, not normalized (C-CO2)
+save_png(plt_avg_aer_co2, plt_folder_path, "2022-07-08", "Cumulative AER CO2 avgs")
+
+# Cumulative CO2 replicate averages, normalized by g dry sediment (C-CO2/g)
+save_png(plt_avg_aer_co2_g, plt_folder_path, "2022-07-08", "Cumulative AER CO2 avgs_g dry sed")
+
+# Cumulative CO2 replicate averages, normalized by gC (C-CO2/gC)
+save_png(plt_avg_aer_co2_gC, plt_folder_path, "2022-07-08", "Cumulative AER CO2 avgs_gC")
+
+# --- AER CH4 ---
+
+# Cumulative CH4, not normalized (C-CH4)
+save_png(plt_aer_ch4, plt_folder_path, "2022-07-08", "Cumulative AER CH4")
+
+# Cumulative CH4, normalized by g dry sediment (C-CH4/g)
+save_png(plt_aer_ch4_g, plt_folder_path, "2022-07-08", "Cumulative AER CH4_g dry sed")
+
+# Cumulative CH4, normalized by gC (C-CH4/gC)
+save_png(plt_aer_ch4_gC, plt_folder_path, "2022-07-08", "Cumulative AER CH4_gC")
+
+# Cumulative CH4 replicate averages, not normalized (C-CH4)
+save_png(plt_avg_aer_ch4, plt_folder_path, "2022-07-08", "Cumulative AER CH4 avgs")
+
+# Cumulative CH4 replicate averages, normalized by g dry sediment (C-CH4/g)
+save_png(plt_avg_aer_ch4_g, plt_folder_path, "2022-07-08", "Cumulative AER CH4 avgs_g dry sed")
+
+# Cumulative CH4 replicate averages, normalized by gC (C-CH4/gC)
+save_png(plt_avg_aer_ch4_gC, plt_folder_path, "2022-07-08", "Cumulative AER CH4 avgs_gC")
+
+
+# --- Respiration Rates ---
+
+# ANA CO2 respiration rates, normalized by g dry sediment (C-CO2/d/g)
+save_png(plt_avg_resp_rate_ana_CO2_d_g, plt_folder_path, "2022-07-08", "Avg resp rate ANA CO2_g dry sed")
+
+# ANA CO2 respiration rates, normalized by gC (C-CO2/d/gC)
+save_png(plt_avg_resp_rate_ana_CO2_d_gC, plt_folder_path, "2022-07-08", "Avg resp rate ANA CO2_gC")
+
+# ANA CH4 respiration rates, normalized by g dry sediment (C-CH4/d/g)
+save_png(plt_avg_resp_rate_ana_CH4_d_g, plt_folder_path, "2022-07-08", "Avg resp rate ANA CH4_g dry sed")
+
+# ANA CH4 respiration rates, normalized by gC (C-CH4/d/gC)
+save_png(plt_avg_resp_rate_ana_CH4_d_gC, plt_folder_path, "2022-07-08", "Avg resp rate ANA CH4_gC")
+
+# AER CO2 respiration rates, normalized by g dry sediment (C-CO2/d/g)
+save_png(plt_avg_resp_rate_aer_CO2_d_g, plt_folder_path, "2022-07-08", "Avg resp rate AER CO2_g dry sed")
+
+# AER CO2 respiration rates, normalized by gC (C-CO2/d/gC)
+save_png(plt_avg_resp_rate_aer_CO2_d_gC, plt_folder_path, "2022-07-08", "Avg resp rate AER CO2_gC")
+
+# AER CH4 respiration rates, normalized by g dry sediment (C-CH4/d/g)
+save_png(plt_avg_resp_rate_aer_CH4_d_g, plt_folder_path, "2022-07-08", "Avg resp rate AER CH4_g dry sed")
+
+# AER CH4 respiration rates, normalized by gC (C-CH4/d/gC)
+save_png(plt_avg_resp_rate_aer_CH4_d_gC, plt_folder_path, "2022-07-08", "Avg resp rate AER CH4_gC")
+
+
+# --- C-CO2e ---
+
+# Cumulative C-CO2e / gC at final three timepoints (~365 days), AER and ANA
+save_png(plt_avg_tot_resp_co2e_gC, plt_folder_path, "2022-07-08", "Avg total resp CO2e_gC")
+
+# Cumulative C-CO2e / gsed at final three timepoints (~365 days), AER and ANA
+save_png(plt_avg_tot_resp_co2e_gsed, plt_folder_path, "2022-07-08", "Avg total resp CO2e_g dry sed")
+
+
+# --- Q10 temperature sensitivity ---
+
+# --- ANA CO2 ---
+
+# Temperature sensitivity graphs for timepoints 8-10
+save_png(plt_ana_c_co2_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2_8_10")
+
+# Temperature sensitivity graphs for timepoints 24-26
+save_png(plt_ana_c_co2_temp_sens_24_26, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2_24_26")
+
+# Temperature sensitivity graphs for timepoints 35-37
+save_png(plt_ana_c_co2_temp_sens_35_37, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2_35_37")
+
+# --- ANA CH4 ---
+
+# Temperature sensitivity graphs for timepoints 8-10
+save_png(plt_ana_c_ch4_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CH4_8_10")
+
+# Temperature sensitivity graphs for timepoints 24-26
+save_png(plt_ana_c_ch4_temp_sens_24_26, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CH4_24_26")
+
+# Temperature sensitivity graphs for timepoints 35-37
+save_png(plt_ana_c_ch4_temp_sens_35_37, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CH4_35_37")
+
+# --- ANA CO2e ---
+
+# Temperature sensitivity graphs for timepoints 8-10
+save_png(plt_ana_c_co2e_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2e_8_10")
+
+# Temperature sensitivity graphs for timepoints 24-26
+save_png(plt_ana_c_co2e_temp_sens_24_26, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2e_24_26")
+
+# Temperature sensitivity graphs for timepoints 35-37
+save_png(plt_ana_c_co2e_temp_sens_35_37, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2e_35_37")
+
+# --- AER CO2 ---
+
+# Temperature sensitivity graphs for timepoints 8-10
+save_png(plt_aer_c_co2_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2_8_10")
+
+# Temperature sensitivity graphs for timepoints 23-25
+save_png(plt_aer_c_co2_temp_sens_23_25, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2_23_25")
+
+# Temperature sensitivity graphs for timepoints 32-34
+save_png(plt_aer_c_co2_temp_sens_32_34, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2_32_34")
+
+# --- AER CH4 ---
+
+# Temperature sensitivity graphs for timepoints 8-10
+save_png(plt_aer_c_ch4_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens AER CH4_8_10")
+
+# Temperature sensitivity graphs for timepoints 23-25
+save_png(plt_aer_c_ch4_temp_sens_23_25, plt_folder_path, "2022-07-08", "Q10 temp sens AER CH4_23_25")
+
+# Temperature sensitivity graphs for timepoints 32-34
+save_png(plt_aer_c_ch4_temp_sens_32_34, plt_folder_path, "2022-07-08", "Q10 temp sens AER CH4_32_34")
+
+# --- AER CO2e ---
+
+# Temperature sensitivity graphs for timepoints 8-10
+save_png(plt_aer_c_co2e_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2e_8_10")
+
+# Temperature sensitivity graphs for timepoints 23-25
+save_png(plt_aer_c_co2e_temp_sens_23_25, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2e_23_25")
+
+# Temperature sensitivity graphs for timepoints 32-34
+save_png(plt_aer_c_co2e_temp_sens_32_34, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2e_32_34")
+
+```
