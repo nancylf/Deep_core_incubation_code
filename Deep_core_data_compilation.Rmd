@@ -1771,10 +1771,14 @@ print(plt_avg_resp_rate_aer_CH4_d_g)
     * Total C-CO2e = [C-CO2 + C-CH4 (as C-CO2e)]
   
   * Percent of total C respired over the course of the incubations will be calculated at days 30 and 150
+  
+  * Percent of total C mineralized of the original amount of soil TOC will be calculated at days 30, 150, 365
     
-  * Calculate % of C-CO2e released that was contributed by C-CO2 vs C-CH4 at days 30, 150, 365
+  * Percent of C-CO2e released that was contributed by C-CO2 vs C-CH4 will be calculated at days 30, 150, 365
 
-  * Calculate C-CO2:C-CH4 and C-CO2:(C-CH4 as C-CO2e) at days 30, 150, 365
+  * C-CO2:C-CH4 and C-CO2:(C-CH4 as C-CO2e) will be calculated at days 30, 150, 365
+  
+  * Determine how much C-CO2, C-CH4, and total C (C-CO2 + C-CH4) was produced across the sediment column in one year (e.g. gC-CO2/m2/yr), and on an averaged, per day basis (e.g. gC-CO2/m2/d)
 
 ```{r}
 # start by creating 4 dfs (ANA CO2, ANA CH4, AER CO2, AER CH4), join them into 2 dfs (ANA and AER) so as to have separate columns for C-CO2 and C-CH4, then combine them into a single df (tot_resp_co2e) that represents C-CO2e data from three time points during the incubations
@@ -1785,12 +1789,12 @@ print(plt_avg_resp_rate_aer_CH4_d_g)
 # ----- ANA CO2 -----
 tot_resp_ana_co2 <- inc_df2 %>%
   filter(headspace_treatment == "anaerobic", gas_sampled == "CO2", timepoint %in% c(8:10, 24:26, 35:37)) %>%
-  select(core_ID:timepoint, total_resp_ugC_CO2 = total_gas_resp_ugC, total_resp_ugC_CO2_g = total_gas_resp_ugC_g, total_resp_ugC_CO2_gC = total_gas_resp_ugC_gC)
+  select(core_ID:timepoint, TOC_perc_wt, total_resp_ugC_CO2 = total_gas_resp_ugC, total_resp_ugC_CO2_g = total_gas_resp_ugC_g, total_resp_ugC_CO2_gC = total_gas_resp_ugC_gC)
 
 # ----- ANA CH4 -----
 tot_resp_ana_ch4 <- inc_df2 %>%
   filter(headspace_treatment == "anaerobic", gas_sampled == "CH4", timepoint %in% c(8:10, 24:26, 35:37)) %>%
-  select(core_ID:timepoint, total_resp_ugC_CH4 = total_gas_resp_ugC, total_resp_ugC_CH4_g = total_gas_resp_ugC_g, total_resp_ugC_CH4_gC = total_gas_resp_ugC_gC) %>%
+  select(core_ID:timepoint, TOC_perc_wt, total_resp_ugC_CH4 = total_gas_resp_ugC, total_resp_ugC_CH4_g = total_gas_resp_ugC_g, total_resp_ugC_CH4_gC = total_gas_resp_ugC_gC) %>%
   mutate(total_resp_ugC_CH4_as_CO2e = total_resp_ugC_CH4 * (16.04 / 44.01) * 28,
          total_resp_ugC_CH4_g_as_CO2e = total_resp_ugC_CH4_g * (16.04 / 44.01) * 28,
          total_resp_ugC_CH4_gC_as_CO2e = total_resp_ugC_CH4_gC * (16.04 / 44.01) * 28)
@@ -1798,12 +1802,12 @@ tot_resp_ana_ch4 <- inc_df2 %>%
 # ----- AER CO2 -----
 tot_resp_aer_co2 <- inc_df2 %>%
   filter(headspace_treatment == "aerobic", gas_sampled == "CO2", timepoint %in% c(8:10, 23:25, 32:34)) %>%
-  select(core_ID:timepoint, total_resp_ugC_CO2 = total_gas_resp_ugC, total_resp_ugC_CO2_g = total_gas_resp_ugC_g, total_resp_ugC_CO2_gC = total_gas_resp_ugC_gC)
+  select(core_ID:timepoint, TOC_perc_wt, total_resp_ugC_CO2 = total_gas_resp_ugC, total_resp_ugC_CO2_g = total_gas_resp_ugC_g, total_resp_ugC_CO2_gC = total_gas_resp_ugC_gC)
 
 # ----- AER CH4 -----
 tot_resp_aer_ch4 <- inc_df2 %>%
   filter(headspace_treatment == "aerobic", gas_sampled == "CH4", timepoint %in% c(8:10, 23:25, 32:34)) %>%
-  select(core_ID:timepoint, total_resp_ugC_CH4 = total_gas_resp_ugC, total_resp_ugC_CH4_g = total_gas_resp_ugC_g, total_resp_ugC_CH4_gC = total_gas_resp_ugC_gC) %>%
+  select(core_ID:timepoint, TOC_perc_wt, total_resp_ugC_CH4 = total_gas_resp_ugC, total_resp_ugC_CH4_g = total_gas_resp_ugC_g, total_resp_ugC_CH4_gC = total_gas_resp_ugC_gC) %>%
   mutate(total_resp_ugC_CH4_as_CO2e = total_resp_ugC_CH4 * (16.04 / 44.01) * 28,
          total_resp_ugC_CH4_g_as_CO2e = total_resp_ugC_CH4_g * (16.04 / 44.01) * 28,
          total_resp_ugC_CH4_gC_as_CO2e = total_resp_ugC_CH4_gC * (16.04 / 44.01) * 28)
@@ -1825,18 +1829,26 @@ tot_resp_co2e <- full_join(tot_resp_ana_co2e, tot_resp_aer_co2e) %>%
          total_resp_ugC_CO2e_gC = total_resp_ugC_CO2_gC + total_resp_ugC_CH4_gC_as_CO2e) %>%
   arrange(desc(headspace_treatment), depth_ID, temp_treatment_C, samp_int_date)
 
+# add average bulk density column from sample_key_data sheet
+avg_bulk_density <- read_excel(sample_key_data, "Bulk density data")
+tot_resp_co2e <- left_join(tot_resp_co2e, avg_bulk_density) 
+
 # create a df that calculates averages and standard errors for C-CO2, C-CH4, C-CH4 as C-CO2e, and total C-CO2e (C-CO2 + C-CH4 as C-CO2e) - these will be reported as normalized by g sed and gC
 # df contains three sets of dates, each of which is made up of three timepoints at the beginning, middle, and end of the incubations (3 timepoints at ~30 days, 3 timepoints at ~150 days, 3 timepoints at ~365 days)
 # an average was taken of each set of replicates (1-3, 4-6, 7-9) across the sets of timepoints - e.g. 9 data points were averaged for depth 1 at 4C and ~30 days (reps 1-3 x 3 timepoints); 9 data points were averaged for depth 1 at 10C and ~150 days (reps 4-6 x 3 timepoints), etc.
 
 # sequence generates a sequence of values: seq(from, to, by)
-# cut() divides a range of x (in this case a column) into intervals and then groups data into its specified interval; the intervals use open and closed brackets -- i.e. "(" is an open interval - this means it does not include the endpoint, e.g. (0,1) describes an interval greater than 0 and less than 1; "[" is a closed interval - this means that it includes the endpoint, e.g. [0,1] describes an interval greater than or equal to 0 and less than or equal to 1; both can be used on a set, e.g. [1,5) describes an interval that includes 1 but excludes 5.
+# cut() divides a range of x (in this case a column) into intervals and then groups data into its specified interval; the intervals use open and closed brackets -- i.e. "(" is an open interval - this means it does not include the endpoint, e.g. (0,1) describes an interval greater than 0 and less than 1; "[" is a closed interval - this means that it includes the endpoint, e.g. [0,1] describes an interval greater than or equal to 0 and less than or equal to 1; both can be used on a set, e.g. [1,5) describes an interval that includes 1 but excludes 5. The default setting is ( , ]. 
 avg_tot_resp_co2e <- tot_resp_co2e %>%
   mutate(replicate = as.numeric(replicate), timepoint = as.numeric(timepoint)) %>%
   group_by(headspace_treatment, depth_ID, replicate = cut(replicate, breaks = seq(0, 9, by = 3), labels = c("1-3", "4-6", "7-9")), timepoint = cut(timepoint, breaks = seq(0, 45, by = 15))) %>%
             
+            #TOC and bulk density - only to keep these columns in the new df
+  summarise(TOC_perc_wt = mean(TOC_perc_wt),
+            avg_bulk_density_g_cm3 = mean(average_bulk_density_g_cm3),
+            
             #C-CO2/g sed and C-CO2/gC
-  summarise(avg_total_resp_ugC_CO2_g = mean(total_resp_ugC_CO2_g), 
+            avg_total_resp_ugC_CO2_g = mean(total_resp_ugC_CO2_g), 
             se_total_resp_ugC_CO2_g = (sd(total_resp_ugC_CO2_g) / 9),
             avg_total_resp_ugC_CO2_gC = mean(total_resp_ugC_CO2_gC), 
             se_total_resp_ugC_CO2_gC = (sd(total_resp_ugC_CO2_gC) / 9), 
@@ -1882,11 +1894,13 @@ avg_tot_resp_co2e <- avg_tot_resp_co2e %>%
   mutate(temp_treatment_C = ifelse(replicate == "1-3", 4, ifelse(replicate == "4-6", 10, 20)))
 
 # calculate % of total C respired by days 30 and 150 of the incubations
+# calculate % of total C mineralized of the original soil TOC at days 30, 150, 365
 # calculate % of CO2e released that was contributed by CO2 vs CH4 at days 30, 150, 365
 # calculate C-CO2:C-CH4 and C-CO2:(C-CH4 as C-CO2e) at days 30, 150, 365
-# note that these calculation use the averages across the three timepoints at the beginning of the incubations (~30 days), the middle (~150 days), and the end (~365 days)
+# note that these calculations use the averages across the three timepoints at the beginning of the incubations (~30 days), the middle (~150 days), and the end (~365 days)
 avg_tot_resp_co2e <- avg_tot_resp_co2e %>%
   mutate(perc_total_C_resp = NA,
+         perc_of_TOC_mineralized = ((avg_total_C_resp_ugC_g / 10^(6)) / (TOC_perc_wt / 100)) * 100,
          perc_CO2_of_CO2e = (avg_total_resp_ugC_CO2_gC / avg_total_resp_ugC_CO2e_gC) * 100,
          perc_CH4_as_CO2e_of_CO2e = (avg_total_resp_ugC_CH4_gC_as_CO2e / avg_total_resp_ugC_CO2e_gC) * 100,
          C_CO2_to_C_CH4 = avg_total_resp_ugC_CO2_gC / avg_total_resp_ugC_CH4_gC,
@@ -1907,8 +1921,54 @@ for (i in 1:length(avg_tot_resp_co2e$timepoint)){
 # Filter avg_tot_resp_co2e to include only the last three timepoints - this represents averages across the final three timepoints for each set of replicates (n = 9)
 # This df will be used to create plots in Excel with C-CO2, C-CH4, and C-CO2e, as total respiration and also as total respiration normalized by gC
 avg_tot_resp_co2e_day365 <- avg_tot_resp_co2e %>%
-  filter(timepoint == "32-34" | timepoint == "35-37")
+  filter(timepoint == "32-34" | timepoint == "35-37") 
 
+# Determine how much C-CO2, C-CH4, and total C (C-CO2 + C-CH4) was produced across the sediment column in one year, and on an average, per-day basis. Use a copy of the df avg_tot_resp_co2e_day365 to do these calculations
+avg_tot_resp_co2e_day365_copy <- avg_tot_resp_co2e_day365 %>%
+  mutate(gC_CO2_cm3 = (avg_total_resp_ugC_CO2_g / (10^6)) * avg_bulk_density_g_cm3,
+         gC_CH4_cm3 = (avg_total_resp_ugC_CH4_g / (10^6)) * avg_bulk_density_g_cm3,
+         total_C_gC_cm3 = (avg_total_C_resp_ugC_g / (10^6)) * avg_bulk_density_g_cm3,
+         depth_ID = as.numeric(depth_ID))
+
+# sediment column production at 4C and day ~365, averaged across shallow, intermediate, and deep depths
+sed_column_production_4C <- avg_tot_resp_co2e_day365_copy %>%
+  filter(temp_treatment_C == 4) %>%
+  select(1:5, 34:36) %>%
+  group_by(headspace_treatment, depth_ID = cut(depth_ID, breaks = c(0, 5, 9, 12), labels = c("1-5", "6-9", "10-12")), temp_treatment_C) %>%
+  summarize(avg_gC_CO2_cm3 = mean(gC_CO2_cm3),
+            avg_gC_CH4_cm3 = mean(gC_CH4_cm3),
+            avg_total_C_gC_cm3 = mean(total_C_gC_cm3))
+
+# sediment column production at 10C and day ~365, averaged across shallow, intermediate, and deep depths
+sed_column_production_10C <- avg_tot_resp_co2e_day365_copy %>%
+  filter(temp_treatment_C == 10) %>%
+  select(1:5, 34:36) %>%
+  group_by(headspace_treatment, depth_ID = cut(depth_ID, breaks = c(0, 5, 9, 12), labels = c("1-5", "6-9", "10-12")), temp_treatment_C) %>%
+  summarize(avg_gC_CO2_cm3 = mean(gC_CO2_cm3),
+            avg_gC_CH4_cm3 = mean(gC_CH4_cm3),
+            avg_total_C_gC_cm3 = mean(total_C_gC_cm3))
+
+# sediment column production at 20C and day ~365, averaged across shallow, intermediate, and deep depths
+sed_column_production_20C <- avg_tot_resp_co2e_day365_copy %>%
+  filter(temp_treatment_C == 20) %>%
+  select(1:5, 34:36) %>%
+  group_by(headspace_treatment, depth_ID = cut(depth_ID, breaks = c(0, 5, 9, 12), labels = c("1-5", "6-9", "10-12")), temp_treatment_C) %>%
+  summarize(avg_gC_CO2_cm3 = mean(gC_CO2_cm3),
+            avg_gC_CH4_cm3 = mean(gC_CH4_cm3),
+            avg_total_C_gC_cm3 = mean(total_C_gC_cm3)) 
+
+# calculate sediment column production as g/m2/day and g/m2/yr using depth increments for shallow (0m - 5.99m = 599cm), intermediate (5.99m - 15.99m = 1000cm), deep (15.99m - 19.99m = 400cm)
+sed_column_production_day365 <- full_join(sed_column_production_4C, sed_column_production_10C) %>%
+  full_join(sed_column_production_20C)
+
+sed_column_production_day365 <- sed_column_production_day365 %>%
+  group_by(temp_treatment_C, headspace_treatment, depth_ID) %>% 
+  mutate(avg_gC_CO2_m2_yr = ifelse(depth_ID == "1-5", avg_gC_CO2_cm3 * 599 * 10^(4), ifelse(depth_ID == "6-9", avg_gC_CO2_cm3 * 1000 * 10^(4), avg_gC_CO2_cm3 * 400 * 10^(4))),
+         avg_gC_CO2_m2_d = avg_gC_CO2_m2_yr / 365,
+         avg_gC_CH4_m2_yr = ifelse(depth_ID == "1-5", avg_gC_CH4_cm3 * 599 * 10^(4), ifelse(depth_ID == "6-9", avg_gC_CH4_cm3 * 1000 * 10^(4), avg_gC_CH4_cm3 * 400 * 10^(4))),
+         avg_gC_CH4_m2_d = avg_gC_CH4_m2_yr / 365,
+         avg_total_C_gC_m2_yr = ifelse(depth_ID == "1-5", avg_total_C_gC_cm3 * 599 * 10^(4), ifelse(depth_ID == "6-9", avg_total_C_gC_cm3 * 1000 * 10^(4), avg_total_C_gC_cm3 * 400 * 10^(4))),
+         avg_total_C_gC_m2_d = avg_total_C_gC_m2_yr / 365)
 ```
 
 
@@ -2581,237 +2641,240 @@ temp_sens_ratios <- avg_tot_resp_co2e %>%
     * .csv files change the values in the replicate column to a date format; this also happens with values "8-10" in the timepoint column - need to be corrected if using in another program like Excel
 
 ```{r}
-# [ TABLES ]
-# Update everything with the current date
-
-# write .csv output function to save dfs within local files
-# fx takes character strings for: folder path, date, file name
-save_csv <- function(df, folder_path, date_yr_mo_d, file_name){
-  write.csv(df, paste(as.character(folder_path), "/", as.character(date_yr_mo_d), "_", as.character(file_name), ".csv", sep = ""), row.names = FALSE)
-}
-
-# path to folder where tables will be stored
-table_folder_path <- "/Users/nancylf/Documents/UC Berkeley/Research/NGEE Arctic/NSF Goldstream Project/Incubations/Data Compilation/R Output_Summary Tables/2022"
-
-# table with 12 months of incubation data
-save_csv(inc_df2, table_folder_path, "2022-07-08", "Calculated_Production_and_Resp_Rates")
-
-# table with 12 months of data, averaged across replicates
-save_csv(summ_vals, table_folder_path, "2022-07-08", "Summarized_Resp_Replicate_Avgs")
-
-# table for cumulative respiration (C-CO2, C-CH4, C-CO2e), averaged across three time points at beginning, middle, and end of incubations
-save_csv(avg_tot_resp_co2e, table_folder_path, "2022-07-08", "Avg_Resp_3_Timepoints")
-
-# # table for cumulative respiration (C-CO2, C-CH4, C-CO2e), averaged across three time points at the end of incubations; use this for easier graphing in Excel
-# save_csv(avg_tot_resp_co2e_day365, table_folder_path, "2022-07-08", "Avg_Resp_3_Timepoints_Day365")
-
-# table for Q10 temperature sensitivity values
-save_csv(q10_df, table_folder_path, "2022-07-27", "Q10_Values_3_Timepoints")
-
-# table for temperature sensitivity ratios
-save_csv(temp_sens_ratios, table_folder_path, "2022-07-08", "Temp_Sens_Ratios_3_Timepoints")
+# # [ TABLES ]
+# # Update everything with the current date
+# 
+# # write .csv output function to save dfs within local files
+# # fx takes character strings for: folder path, date, file name
+# save_csv <- function(df, folder_path, date_yr_mo_d, file_name){
+#   write.csv(df, paste(as.character(folder_path), "/", as.character(date_yr_mo_d), "_", as.character(file_name), ".csv", sep = ""), row.names = FALSE)
+# }
+# 
+# # path to folder where tables will be stored
+# table_folder_path <- "/Users/nancylf/Documents/UC Berkeley/Research/NGEE Arctic/NSF Goldstream Project/Incubations/Data Compilation/R Output_Summary Tables/2024"
+# 
+# # table with 12 months of incubation data
+# save_csv(inc_df2, table_folder_path, "2022-07-08", "Calculated_Production_and_Resp_Rates")
+# 
+# # table with 12 months of data, averaged across replicates
+# save_csv(summ_vals, table_folder_path, "2022-07-08", "Summarized_Resp_Replicate_Avgs")
+# 
+# # table for cumulative respiration (C-CO2, C-CH4, C-CO2e), averaged across three time points at beginning, middle, and end of incubations
+# save_csv(avg_tot_resp_co2e, table_folder_path, "2022-07-08", "Avg_Resp_3_Timepoints")
+# 
+# # # table for cumulative respiration (C-CO2, C-CH4, C-CO2e), averaged across three time points at the end of incubations; use this for easier graphing in Excel
+# # save_csv(avg_tot_resp_co2e_day365, table_folder_path, "2022-07-08", "Avg_Resp_3_Timepoints_Day365")
+# 
+# # table for sediment column production (C-CO2, C-CH4, total C), averaged across three time points at the end of incubations
+# save_csv(sed_column_production_day365, table_folder_path, "2024-07-22", "Avg_Sed_Col_Production_3_Timepoints_Day365")
+# 
+# # table for Q10 temperature sensitivity values
+# save_csv(q10_df, table_folder_path, "2022-07-27", "Q10_Values_3_Timepoints")
+# 
+# # table for temperature sensitivity ratios
+# save_csv(temp_sens_ratios, table_folder_path, "2022-07-08", "Temp_Sens_Ratios_3_Timepoints")
 
 ```
 
 ##### 17. Save plots as .png files
 
 ```{r}
-# [ PLOTS ]
-# Update everything with the current date
-
-# write .png output function to save plots within local files
-# fx takes character strings for: folder path, date, file name
-save_png <- function(plt_name, folder_path, date_yr_mo_d, file_name){
-  ggsave(plot = plt_name, paste(as.character(folder_path), "/", as.character(date_yr_mo_d), "_", as.character(file_name), ".png", sep = ""))
-}
-
-# path to folder where plots will be stored
-plt_folder_path <- "/Users/nancylf/Documents/UC Berkeley/Research/NGEE Arctic/NSF Goldstream Project/Incubations/Data Compilation/R Output_Graphs/2022"
-
-
-# --- ANA CO2 ---
-
-# Cumulative CO2, not normalized (C-CO2)
-save_png(plt_ana_co2, plt_folder_path, "2022-07-08", "Cumulative ANA CO2")
-
-# Cumulative CO2, normalized by g dry sediment (C-CO2/g)
-save_png(plt_ana_co2_g, plt_folder_path, "2022-07-08", "Cumulative ANA CO2_g dry sed")
-
-# Cumulative CO2, normalized by gC (C-CO2/gC)
-save_png(plt_ana_co2_gC, plt_folder_path, "2022-07-08", "Cumulative ANA CO2_gC")
-
-# Cumulative CO2 replicate averages, not normalized (C-CO2)
-save_png(plt_avg_ana_co2, plt_folder_path, "2022-07-08", "Cumulative ANA CO2 avgs")
-
-# Cumulative CO2 replicate averages, normalized by g dry sediment (C-CO2/g)
-save_png(plt_avg_ana_co2_g, plt_folder_path, "2022-07-08", "Cumulative ANA CO2 avgs_g dry sed")
-
-# Cumulative CO2 replicate averages, normalized by gC (C-CO2/gC)
-save_png(plt_avg_ana_co2_gC, plt_folder_path, "2022-07-08", "Cumulative ANA CO2 avgs_gC")
-
-# --- ANA CH4 ---
-
-# Cumulative CH4, not normalized (C-CH4)
-save_png(plt_ana_ch4, plt_folder_path, "2022-07-08", "Cumulative ANA CH4")
-
-# Cumulative CH4, normalized by g dry sediment (C-CH4/g)
-save_png(plt_ana_ch4_g, plt_folder_path, "2022-07-08", "Cumulative ANA CH4_g dry sed")
-
-# Cumulative CH4, normalized by gC (C-CH4/gC)
-save_png(plt_ana_ch4_gC, plt_folder_path, "2022-07-08", "Cumulative ANA CH4_gC")
-
-# Cumulative CH4 replicate averages, not normalized (C-CH4)
-save_png(plt_avg_ana_ch4, plt_folder_path, "2022-07-08", "Cumulative ANA CH4 avgs")
-
-# Cumulative CH4 replicate averages, normalized by g dry sediment (C-CH4/g)
-save_png(plt_avg_ana_ch4_g, plt_folder_path, "2022-07-08", "Cumulative ANA CH4 avgs_g dry sed")
-
-# Cumulative CH4 replicate averages, normalized by gC (C-CH4/gC)
-save_png(plt_avg_ana_ch4_gC, plt_folder_path, "2022-07-08", "Cumulative ANA CH4 avgs_gC")
-
-# --- AER CO2 ---
-
-# Cumulative CO2, not normalized (C-CO2)
-save_png(plt_aer_co2, plt_folder_path, "2022-07-08", "Cumulative AER CO2")
-
-# Cumulative CO2, normalized by g dry sediment (C-CO2/g)
-save_png(plt_aer_co2_g, plt_folder_path, "2022-07-08", "Cumulative AER CO2_g dry sed")
-
-# Cumulative CO2, normalized by gC (C-CO2/gC)
-save_png(plt_aer_co2_gC, plt_folder_path, "2022-07-08", "Cumulative AER CO2_gC")
-
-# Cumulative CO2 replicate averages, not normalized (C-CO2)
-save_png(plt_avg_aer_co2, plt_folder_path, "2022-07-08", "Cumulative AER CO2 avgs")
-
-# Cumulative CO2 replicate averages, normalized by g dry sediment (C-CO2/g)
-save_png(plt_avg_aer_co2_g, plt_folder_path, "2022-07-08", "Cumulative AER CO2 avgs_g dry sed")
-
-# Cumulative CO2 replicate averages, normalized by gC (C-CO2/gC)
-save_png(plt_avg_aer_co2_gC, plt_folder_path, "2022-07-08", "Cumulative AER CO2 avgs_gC")
-
-# --- AER CH4 ---
-
-# Cumulative CH4, not normalized (C-CH4)
-save_png(plt_aer_ch4, plt_folder_path, "2022-07-08", "Cumulative AER CH4")
-
-# Cumulative CH4, normalized by g dry sediment (C-CH4/g)
-save_png(plt_aer_ch4_g, plt_folder_path, "2022-07-08", "Cumulative AER CH4_g dry sed")
-
-# Cumulative CH4, normalized by gC (C-CH4/gC)
-save_png(plt_aer_ch4_gC, plt_folder_path, "2022-07-08", "Cumulative AER CH4_gC")
-
-# Cumulative CH4 replicate averages, not normalized (C-CH4)
-save_png(plt_avg_aer_ch4, plt_folder_path, "2022-07-08", "Cumulative AER CH4 avgs")
-
-# Cumulative CH4 replicate averages, normalized by g dry sediment (C-CH4/g)
-save_png(plt_avg_aer_ch4_g, plt_folder_path, "2022-07-08", "Cumulative AER CH4 avgs_g dry sed")
-
-# Cumulative CH4 replicate averages, normalized by gC (C-CH4/gC)
-save_png(plt_avg_aer_ch4_gC, plt_folder_path, "2022-07-08", "Cumulative AER CH4 avgs_gC")
-
-
-# --- Respiration Rates ---
-
-# ANA CO2 respiration rates, normalized by g dry sediment (C-CO2/d/g)
-save_png(plt_avg_resp_rate_ana_CO2_d_g, plt_folder_path, "2022-07-08", "Avg resp rate ANA CO2_g dry sed")
-
-# ANA CO2 respiration rates, normalized by gC (C-CO2/d/gC)
-save_png(plt_avg_resp_rate_ana_CO2_d_gC, plt_folder_path, "2022-07-08", "Avg resp rate ANA CO2_gC")
-
-# ANA CH4 respiration rates, normalized by g dry sediment (C-CH4/d/g)
-save_png(plt_avg_resp_rate_ana_CH4_d_g, plt_folder_path, "2022-07-08", "Avg resp rate ANA CH4_g dry sed")
-
-# ANA CH4 respiration rates, normalized by gC (C-CH4/d/gC)
-save_png(plt_avg_resp_rate_ana_CH4_d_gC, plt_folder_path, "2022-07-08", "Avg resp rate ANA CH4_gC")
-
-# AER CO2 respiration rates, normalized by g dry sediment (C-CO2/d/g)
-save_png(plt_avg_resp_rate_aer_CO2_d_g, plt_folder_path, "2022-07-08", "Avg resp rate AER CO2_g dry sed")
-
-# AER CO2 respiration rates, normalized by gC (C-CO2/d/gC)
-save_png(plt_avg_resp_rate_aer_CO2_d_gC, plt_folder_path, "2022-07-08", "Avg resp rate AER CO2_gC")
-
-# AER CH4 respiration rates, normalized by g dry sediment (C-CH4/d/g)
-save_png(plt_avg_resp_rate_aer_CH4_d_g, plt_folder_path, "2022-07-08", "Avg resp rate AER CH4_g dry sed")
-
-# AER CH4 respiration rates, normalized by gC (C-CH4/d/gC)
-save_png(plt_avg_resp_rate_aer_CH4_d_gC, plt_folder_path, "2022-07-08", "Avg resp rate AER CH4_gC")
-
-
-# --- C-CO2e ---
-
-# Cumulative C-CO2e / gC at final three timepoints (~365 days), AER and ANA
-save_png(plt_avg_tot_resp_co2e_gC, plt_folder_path, "2022-07-08", "Avg total resp CO2e_gC")
-
-# Cumulative C-CO2e / gsed at final three timepoints (~365 days), AER and ANA
-save_png(plt_avg_tot_resp_co2e_gsed, plt_folder_path, "2022-07-08", "Avg total resp CO2e_g dry sed")
-
-
-# --- Q10 temperature sensitivity ---
-
-# --- ANA CO2 ---
-
-# Temperature sensitivity graphs for timepoints 8-10
-save_png(plt_ana_c_co2_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2_8_10")
-
-# Temperature sensitivity graphs for timepoints 24-26
-save_png(plt_ana_c_co2_temp_sens_24_26, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2_24_26")
-
-# Temperature sensitivity graphs for timepoints 35-37
-save_png(plt_ana_c_co2_temp_sens_35_37, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2_35_37")
-
-# --- ANA CH4 ---
-
-# Temperature sensitivity graphs for timepoints 8-10
-save_png(plt_ana_c_ch4_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CH4_8_10")
-
-# Temperature sensitivity graphs for timepoints 24-26
-save_png(plt_ana_c_ch4_temp_sens_24_26, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CH4_24_26")
-
-# Temperature sensitivity graphs for timepoints 35-37
-save_png(plt_ana_c_ch4_temp_sens_35_37, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CH4_35_37")
-
-# --- ANA CO2e ---
-
-# Temperature sensitivity graphs for timepoints 8-10
-save_png(plt_ana_c_co2e_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2e_8_10")
-
-# Temperature sensitivity graphs for timepoints 24-26
-save_png(plt_ana_c_co2e_temp_sens_24_26, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2e_24_26")
-
-# Temperature sensitivity graphs for timepoints 35-37
-save_png(plt_ana_c_co2e_temp_sens_35_37, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2e_35_37")
-
-# --- AER CO2 ---
-
-# Temperature sensitivity graphs for timepoints 8-10
-save_png(plt_aer_c_co2_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2_8_10")
-
-# Temperature sensitivity graphs for timepoints 23-25
-save_png(plt_aer_c_co2_temp_sens_23_25, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2_23_25")
-
-# Temperature sensitivity graphs for timepoints 32-34
-save_png(plt_aer_c_co2_temp_sens_32_34, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2_32_34")
-
-# --- AER CH4 ---
-
-# Temperature sensitivity graphs for timepoints 8-10
-save_png(plt_aer_c_ch4_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens AER CH4_8_10")
-
-# Temperature sensitivity graphs for timepoints 23-25
-save_png(plt_aer_c_ch4_temp_sens_23_25, plt_folder_path, "2022-07-08", "Q10 temp sens AER CH4_23_25")
-
-# Temperature sensitivity graphs for timepoints 32-34
-save_png(plt_aer_c_ch4_temp_sens_32_34, plt_folder_path, "2022-07-08", "Q10 temp sens AER CH4_32_34")
-
-# --- AER CO2e ---
-
-# Temperature sensitivity graphs for timepoints 8-10
-save_png(plt_aer_c_co2e_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2e_8_10")
-
-# Temperature sensitivity graphs for timepoints 23-25
-save_png(plt_aer_c_co2e_temp_sens_23_25, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2e_23_25")
-
-# Temperature sensitivity graphs for timepoints 32-34
-save_png(plt_aer_c_co2e_temp_sens_32_34, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2e_32_34")
+# # [ PLOTS ]
+# # Update everything with the current date
+# 
+# # write .png output function to save plots within local files
+# # fx takes character strings for: folder path, date, file name
+# save_png <- function(plt_name, folder_path, date_yr_mo_d, file_name){
+#   ggsave(plot = plt_name, paste(as.character(folder_path), "/", as.character(date_yr_mo_d), "_", as.character(file_name), ".png", sep = ""))
+# }
+# 
+# # path to folder where plots will be stored
+# plt_folder_path <- "/Users/nancylf/Documents/UC Berkeley/Research/NGEE Arctic/NSF Goldstream Project/Incubations/Data Compilation/R Output_Graphs/2022"
+# 
+# 
+# # --- ANA CO2 ---
+# 
+# # Cumulative CO2, not normalized (C-CO2)
+# save_png(plt_ana_co2, plt_folder_path, "2022-07-08", "Cumulative ANA CO2")
+# 
+# # Cumulative CO2, normalized by g dry sediment (C-CO2/g)
+# save_png(plt_ana_co2_g, plt_folder_path, "2022-07-08", "Cumulative ANA CO2_g dry sed")
+# 
+# # Cumulative CO2, normalized by gC (C-CO2/gC)
+# save_png(plt_ana_co2_gC, plt_folder_path, "2022-07-08", "Cumulative ANA CO2_gC")
+# 
+# # Cumulative CO2 replicate averages, not normalized (C-CO2)
+# save_png(plt_avg_ana_co2, plt_folder_path, "2022-07-08", "Cumulative ANA CO2 avgs")
+# 
+# # Cumulative CO2 replicate averages, normalized by g dry sediment (C-CO2/g)
+# save_png(plt_avg_ana_co2_g, plt_folder_path, "2022-07-08", "Cumulative ANA CO2 avgs_g dry sed")
+# 
+# # Cumulative CO2 replicate averages, normalized by gC (C-CO2/gC)
+# save_png(plt_avg_ana_co2_gC, plt_folder_path, "2022-07-08", "Cumulative ANA CO2 avgs_gC")
+# 
+# # --- ANA CH4 ---
+# 
+# # Cumulative CH4, not normalized (C-CH4)
+# save_png(plt_ana_ch4, plt_folder_path, "2022-07-08", "Cumulative ANA CH4")
+# 
+# # Cumulative CH4, normalized by g dry sediment (C-CH4/g)
+# save_png(plt_ana_ch4_g, plt_folder_path, "2022-07-08", "Cumulative ANA CH4_g dry sed")
+# 
+# # Cumulative CH4, normalized by gC (C-CH4/gC)
+# save_png(plt_ana_ch4_gC, plt_folder_path, "2022-07-08", "Cumulative ANA CH4_gC")
+# 
+# # Cumulative CH4 replicate averages, not normalized (C-CH4)
+# save_png(plt_avg_ana_ch4, plt_folder_path, "2022-07-08", "Cumulative ANA CH4 avgs")
+# 
+# # Cumulative CH4 replicate averages, normalized by g dry sediment (C-CH4/g)
+# save_png(plt_avg_ana_ch4_g, plt_folder_path, "2022-07-08", "Cumulative ANA CH4 avgs_g dry sed")
+# 
+# # Cumulative CH4 replicate averages, normalized by gC (C-CH4/gC)
+# save_png(plt_avg_ana_ch4_gC, plt_folder_path, "2022-07-08", "Cumulative ANA CH4 avgs_gC")
+# 
+# # --- AER CO2 ---
+# 
+# # Cumulative CO2, not normalized (C-CO2)
+# save_png(plt_aer_co2, plt_folder_path, "2022-07-08", "Cumulative AER CO2")
+# 
+# # Cumulative CO2, normalized by g dry sediment (C-CO2/g)
+# save_png(plt_aer_co2_g, plt_folder_path, "2022-07-08", "Cumulative AER CO2_g dry sed")
+# 
+# # Cumulative CO2, normalized by gC (C-CO2/gC)
+# save_png(plt_aer_co2_gC, plt_folder_path, "2022-07-08", "Cumulative AER CO2_gC")
+# 
+# # Cumulative CO2 replicate averages, not normalized (C-CO2)
+# save_png(plt_avg_aer_co2, plt_folder_path, "2022-07-08", "Cumulative AER CO2 avgs")
+# 
+# # Cumulative CO2 replicate averages, normalized by g dry sediment (C-CO2/g)
+# save_png(plt_avg_aer_co2_g, plt_folder_path, "2022-07-08", "Cumulative AER CO2 avgs_g dry sed")
+# 
+# # Cumulative CO2 replicate averages, normalized by gC (C-CO2/gC)
+# save_png(plt_avg_aer_co2_gC, plt_folder_path, "2022-07-08", "Cumulative AER CO2 avgs_gC")
+# 
+# # --- AER CH4 ---
+# 
+# # Cumulative CH4, not normalized (C-CH4)
+# save_png(plt_aer_ch4, plt_folder_path, "2022-07-08", "Cumulative AER CH4")
+# 
+# # Cumulative CH4, normalized by g dry sediment (C-CH4/g)
+# save_png(plt_aer_ch4_g, plt_folder_path, "2022-07-08", "Cumulative AER CH4_g dry sed")
+# 
+# # Cumulative CH4, normalized by gC (C-CH4/gC)
+# save_png(plt_aer_ch4_gC, plt_folder_path, "2022-07-08", "Cumulative AER CH4_gC")
+# 
+# # Cumulative CH4 replicate averages, not normalized (C-CH4)
+# save_png(plt_avg_aer_ch4, plt_folder_path, "2022-07-08", "Cumulative AER CH4 avgs")
+# 
+# # Cumulative CH4 replicate averages, normalized by g dry sediment (C-CH4/g)
+# save_png(plt_avg_aer_ch4_g, plt_folder_path, "2022-07-08", "Cumulative AER CH4 avgs_g dry sed")
+# 
+# # Cumulative CH4 replicate averages, normalized by gC (C-CH4/gC)
+# save_png(plt_avg_aer_ch4_gC, plt_folder_path, "2022-07-08", "Cumulative AER CH4 avgs_gC")
+# 
+# 
+# # --- Respiration Rates ---
+# 
+# # ANA CO2 respiration rates, normalized by g dry sediment (C-CO2/d/g)
+# save_png(plt_avg_resp_rate_ana_CO2_d_g, plt_folder_path, "2022-07-08", "Avg resp rate ANA CO2_g dry sed")
+# 
+# # ANA CO2 respiration rates, normalized by gC (C-CO2/d/gC)
+# save_png(plt_avg_resp_rate_ana_CO2_d_gC, plt_folder_path, "2022-07-08", "Avg resp rate ANA CO2_gC")
+# 
+# # ANA CH4 respiration rates, normalized by g dry sediment (C-CH4/d/g)
+# save_png(plt_avg_resp_rate_ana_CH4_d_g, plt_folder_path, "2022-07-08", "Avg resp rate ANA CH4_g dry sed")
+# 
+# # ANA CH4 respiration rates, normalized by gC (C-CH4/d/gC)
+# save_png(plt_avg_resp_rate_ana_CH4_d_gC, plt_folder_path, "2022-07-08", "Avg resp rate ANA CH4_gC")
+# 
+# # AER CO2 respiration rates, normalized by g dry sediment (C-CO2/d/g)
+# save_png(plt_avg_resp_rate_aer_CO2_d_g, plt_folder_path, "2022-07-08", "Avg resp rate AER CO2_g dry sed")
+# 
+# # AER CO2 respiration rates, normalized by gC (C-CO2/d/gC)
+# save_png(plt_avg_resp_rate_aer_CO2_d_gC, plt_folder_path, "2022-07-08", "Avg resp rate AER CO2_gC")
+# 
+# # AER CH4 respiration rates, normalized by g dry sediment (C-CH4/d/g)
+# save_png(plt_avg_resp_rate_aer_CH4_d_g, plt_folder_path, "2022-07-08", "Avg resp rate AER CH4_g dry sed")
+# 
+# # AER CH4 respiration rates, normalized by gC (C-CH4/d/gC)
+# save_png(plt_avg_resp_rate_aer_CH4_d_gC, plt_folder_path, "2022-07-08", "Avg resp rate AER CH4_gC")
+# 
+# 
+# # --- C-CO2e ---
+# 
+# # Cumulative C-CO2e / gC at final three timepoints (~365 days), AER and ANA
+# save_png(plt_avg_tot_resp_co2e_gC, plt_folder_path, "2022-07-08", "Avg total resp CO2e_gC")
+# 
+# # Cumulative C-CO2e / gsed at final three timepoints (~365 days), AER and ANA
+# save_png(plt_avg_tot_resp_co2e_gsed, plt_folder_path, "2022-07-08", "Avg total resp CO2e_g dry sed")
+# 
+# 
+# # --- Q10 temperature sensitivity ---
+# 
+# # --- ANA CO2 ---
+# 
+# # Temperature sensitivity graphs for timepoints 8-10
+# save_png(plt_ana_c_co2_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2_8_10")
+# 
+# # Temperature sensitivity graphs for timepoints 24-26
+# save_png(plt_ana_c_co2_temp_sens_24_26, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2_24_26")
+# 
+# # Temperature sensitivity graphs for timepoints 35-37
+# save_png(plt_ana_c_co2_temp_sens_35_37, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2_35_37")
+# 
+# # --- ANA CH4 ---
+# 
+# # Temperature sensitivity graphs for timepoints 8-10
+# save_png(plt_ana_c_ch4_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CH4_8_10")
+# 
+# # Temperature sensitivity graphs for timepoints 24-26
+# save_png(plt_ana_c_ch4_temp_sens_24_26, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CH4_24_26")
+# 
+# # Temperature sensitivity graphs for timepoints 35-37
+# save_png(plt_ana_c_ch4_temp_sens_35_37, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CH4_35_37")
+# 
+# # --- ANA CO2e ---
+# 
+# # Temperature sensitivity graphs for timepoints 8-10
+# save_png(plt_ana_c_co2e_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2e_8_10")
+# 
+# # Temperature sensitivity graphs for timepoints 24-26
+# save_png(plt_ana_c_co2e_temp_sens_24_26, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2e_24_26")
+# 
+# # Temperature sensitivity graphs for timepoints 35-37
+# save_png(plt_ana_c_co2e_temp_sens_35_37, plt_folder_path, "2022-07-08", "Q10 temp sens ANA CO2e_35_37")
+# 
+# # --- AER CO2 ---
+# 
+# # Temperature sensitivity graphs for timepoints 8-10
+# save_png(plt_aer_c_co2_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2_8_10")
+# 
+# # Temperature sensitivity graphs for timepoints 23-25
+# save_png(plt_aer_c_co2_temp_sens_23_25, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2_23_25")
+# 
+# # Temperature sensitivity graphs for timepoints 32-34
+# save_png(plt_aer_c_co2_temp_sens_32_34, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2_32_34")
+# 
+# # --- AER CH4 ---
+# 
+# # Temperature sensitivity graphs for timepoints 8-10
+# save_png(plt_aer_c_ch4_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens AER CH4_8_10")
+# 
+# # Temperature sensitivity graphs for timepoints 23-25
+# save_png(plt_aer_c_ch4_temp_sens_23_25, plt_folder_path, "2022-07-08", "Q10 temp sens AER CH4_23_25")
+# 
+# # Temperature sensitivity graphs for timepoints 32-34
+# save_png(plt_aer_c_ch4_temp_sens_32_34, plt_folder_path, "2022-07-08", "Q10 temp sens AER CH4_32_34")
+# 
+# # --- AER CO2e ---
+# 
+# # Temperature sensitivity graphs for timepoints 8-10
+# save_png(plt_aer_c_co2e_temp_sens_8_10, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2e_8_10")
+# 
+# # Temperature sensitivity graphs for timepoints 23-25
+# save_png(plt_aer_c_co2e_temp_sens_23_25, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2e_23_25")
+# 
+# # Temperature sensitivity graphs for timepoints 32-34
+# save_png(plt_aer_c_co2e_temp_sens_32_34, plt_folder_path, "2022-07-08", "Q10 temp sens AER CO2e_32_34")
 
 ```
